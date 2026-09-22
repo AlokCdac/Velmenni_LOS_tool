@@ -5,7 +5,7 @@ import streamlit as st
 import plotly.graph_objects as go
 
 try:
-    import srtm
+    #import srtm
 except ImportError:
     srtm = None
 
