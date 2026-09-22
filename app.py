@@ -341,6 +341,43 @@ def analyze_los(
         clearance_after_fresnel,
         np.inf,
     )
+# ============================================================
+# RECOMMENDED MOUNTING HEIGHT CALCULATION
+# ============================================================
+
+def calculate_min_mounting_heights(terrain_df, total_distance_m, clearance_margin_m=1.0):
+    """
+    Calculates the minimum equal mounting height required at both sites
+    to clear all terrain obstructions with a safety margin.
+    """
+    df = terrain_df.copy()
+    x = df["distance_m"].to_numpy()
+    terrain = df["terrain_elevation_m"].to_numpy()
+    
+    # Calculate Earth curvature
+    earth_bulge = x * (total_distance_m - x) / (2 * EARTH_RADIUS_M)
+    effective_terrain = terrain + earth_bulge
+    
+    ground_a = terrain[0]
+    ground_b = terrain[-1]
+    
+    # Exclude immediate endpoints (the sites themselves)
+    x_mid = x[1:-1]
+    eff_mid = effective_terrain[1:-1] + clearance_margin_m
+    
+    # Linear interpolation factor across path
+    fraction = x_mid / total_distance_m
+    
+    # Elevation of imaginary ground-to-ground line
+    ground_path = ground_a + fraction * (ground_b - ground_a)
+    
+    # Calculate height deficit along intermediate terrain
+    height_deficit = eff_mid - ground_path
+    
+    # Get maximum deficit needed
+    min_mount_height = max(0.0, float(np.max(height_deficit)))
+    
+    return min_mount_height
 
     critical_los_index = int(np.argmin(interior_clearance))
     critical_fresnel_index = int(np.argmin(interior_fresnel_clearance))
@@ -559,6 +596,28 @@ if calculate:
             wavelength_nm,
             fresnel_percentage,
         )
+        # ----------------------------------------------------
+        # Recommended Mounting Height Display
+        # ----------------------------------------------------
+
+        rec_height = calculate_min_mounting_heights(
+            terrain_df, 
+            distance_m, 
+            clearance_margin_m=1.0 # 1 meter clearance safety margin
+        )
+
+        st.subheader("💡 Recommended Mounting Height")
+
+        if height_a >= rec_height and height_b >= rec_height:
+            st.success(
+                f"Your current mounting heights ({height_a:.1f} m / {height_b:.1f} m) "
+                f"are sufficient! Recommended minimum height for both sites is **{rec_height:.2f} m**."
+            )
+        else:
+            st.warning(
+                f"To achieve full terrain clearance with a 1m safety buffer, "
+                f"increase mounting heights at both sites to at least **{rec_height:.2f} m**."
+            )
 
         df = result["data"]
 
