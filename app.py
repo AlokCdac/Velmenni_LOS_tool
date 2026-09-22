@@ -120,49 +120,31 @@ def destination_point(lat, lon, bearing_deg, distance_m):
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_elevations(points):
     """
-    Retrieve elevation values using Open-Elevation.
-
+    Retrieve elevation values using the Open-Meteo Elevation API.
     points: list of (latitude, longitude)
     """
+    lats = [float(lat) for lat, _ in points]
+    lons = [float(lon) for _, lon in points]
 
-    locations = [
-        {
-            "latitude": float(lat),
-            "longitude": float(lon),
-        }
-        for lat, lon in points
-    ]
-
-    url = "https://api.open-elevation.com/api/v1/lookup"
-
-    payload = {
-        "locations": locations
+    url = "https://api.open-meteo.com/v1/elevation"
+    params = {
+        "latitude": ",".join(map(str, lats)),
+        "longitude": ",".join(map(str, lons)),
     }
 
-    response = requests.post(
+    response = requests.get(
         url,
-        json=payload,
+        params=params,
         timeout=60,
     )
 
     response.raise_for_status()
-
     data = response.json()
 
-    if "results" not in data:
+    if "elevation" not in data:
         raise RuntimeError("Elevation API returned an unexpected response.")
 
-    elevations = []
-
-    for item in data["results"]:
-        elevation = item.get("elevation")
-
-        if elevation is None:
-            elevations.append(np.nan)
-        else:
-            elevations.append(float(elevation))
-
-    return elevations
+    return [float(e) if e is not None else np.nan for e in data["elevation"]]
 
 
 def get_terrain_profile(
