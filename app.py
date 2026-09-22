@@ -1,8 +1,8 @@
 import math
 import time
-import requests
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 import plotly.graph_objects as go
 
@@ -39,7 +39,6 @@ def haversine_distance(lat1, lon1, lat2, lon2):
     Calculate great-circle distance between two GPS coordinates.
     Returns distance in metres.
     """
-
     lat1_rad = math.radians(lat1)
     lat2_rad = math.radians(lat2)
 
@@ -62,7 +61,6 @@ def initial_bearing(lat1, lon1, lat2, lon2):
     """
     Calculate initial bearing from Site A to Site B.
     """
-
     lat1_rad = math.radians(lat1)
     lat2_rad = math.radians(lat2)
 
@@ -86,7 +84,6 @@ def destination_point(lat, lon, bearing_deg, distance_m):
     """
     Calculate a GPS point at a given distance and bearing.
     """
-
     lat_rad = math.radians(lat)
     lon_rad = math.radians(lon)
     bearing_rad = math.radians(bearing_deg)
@@ -158,7 +155,6 @@ def get_terrain_profile(
     """
     Generate intermediate GPS points and obtain terrain elevation.
     """
-
     bearing = initial_bearing(
         lat1,
         lon1,
@@ -182,23 +178,15 @@ def get_terrain_profile(
             float(distance),
         )
 
-        coordinates.append(
-            (lat, lon)
-        )
+        coordinates.append((lat, lon))
 
     # Keep requests reasonably sized.
     batch_size = 100
-
     elevations = []
 
     for start in range(0, len(coordinates), batch_size):
-
-        batch = coordinates[
-            start:start + batch_size
-        ]
-
+        batch = coordinates[start : start + batch_size]
         batch_elevations = get_elevations(batch)
-
         elevations.extend(batch_elevations)
 
         # Small delay between API batches.
@@ -228,119 +216,17 @@ def calculate_fresnel_radius(
 ):
     """
     First Fresnel-zone radius.
-
     r = sqrt(lambda * d1 * d2 / D)
     """
-
     d1 = distance_from_a
     d2 = distance_m - distance_from_a
 
     if d1 <= 0 or d2 <= 0:
         return 0.0
 
-    return math.sqrt(
-        wavelength_m
-        * d1
-        * d2
-        / distance_m
-    )
+    return math.sqrt(wavelength_m * d1 * d2 / distance_m)
 
 
-# ============================================================
-# LOS ANALYSIS
-# ============================================================
-
-def analyze_los(
-    terrain_df,
-    device_height_a,
-    device_height_b,
-    wavelength_nm,
-    fresnel_percentage,
-):
-    """
-    Analyze terrain versus optical LOS.
-    """
-
-    df = terrain_df.copy()
-
-    distance_m = float(
-        df["distance_m"].iloc[-1]
-    )
-
-    terrain = df[
-        "terrain_elevation_m"
-    ].to_numpy()
-
-    x = df[
-        "distance_m"
-    ].to_numpy()
-
-    # Earth curvature
-    earth_bulge = (
-        x
-        * (distance_m - x)
-        / (2 * EARTH_RADIUS_M)
-    )
-
-    # Endpoint ground elevations
-    ground_a = float(terrain[0])
-    ground_b = float(terrain[-1])
-
-    # Actual optical aperture elevations
-    aperture_a = ground_a + device_height_a
-    aperture_b = ground_b + device_height_b
-
-    # Straight optical LOS
-    los_absolute = (
-        aperture_a
-        + (aperture_b - aperture_a)
-        * (x / distance_m)
-    )
-
-    # Correct terrain for earth curvature.
-    effective_terrain = terrain + earth_bulge
-
-    # Geometrical LOS clearance
-    geometric_clearance = los_absolute - effective_terrain
-
-    # Fresnel zone
-    wavelength_m = wavelength_nm * 1e-9
-    fresnel_radius = np.zeros_like(x)
-
-    for i, distance in enumerate(x):
-        fresnel_radius[i] = calculate_fresnel_radius(
-            distance_m,
-            wavelength_m,
-            float(distance),
-        )
-
-    required_fresnel_clearance = (
-        fresnel_radius
-        * fresnel_percentage
-        / 100.0
-    )
-
-    clearance_after_fresnel = (
-        geometric_clearance
-        - required_fresnel_clearance
-    )
-
-    # Ignore endpoints when looking for obstruction.
-    interior = np.ones(len(df), dtype=bool)
-    interior[0] = False
-    interior[-1] = False
-
-    interior_clearance = np.where(
-        interior,
-        geometric_clearance,
-        np.inf,
-    )
-
-    interior_fresnel_clearance = np.where(
-        interior,
-        clearance_after_fresnel,
-        np.inf,
-    )
 # ============================================================
 # RECOMMENDED MOUNTING HEIGHT CALCULATION
 # ============================================================
@@ -378,6 +264,83 @@ def calculate_min_mounting_heights(terrain_df, total_distance_m, clearance_margi
     min_mount_height = max(0.0, float(np.max(height_deficit)))
     
     return min_mount_height
+
+
+# ============================================================
+# LOS ANALYSIS
+# ============================================================
+
+def analyze_los(
+    terrain_df,
+    device_height_a,
+    device_height_b,
+    wavelength_nm,
+    fresnel_percentage,
+):
+    """
+    Analyze terrain versus optical LOS.
+    """
+    df = terrain_df.copy()
+
+    distance_m = float(df["distance_m"].iloc[-1])
+    terrain = df["terrain_elevation_m"].to_numpy()
+    x = df["distance_m"].to_numpy()
+
+    # Earth curvature
+    earth_bulge = x * (distance_m - x) / (2 * EARTH_RADIUS_M)
+
+    # Endpoint ground elevations
+    ground_a = float(terrain[0])
+    ground_b = float(terrain[-1])
+
+    # Actual optical aperture elevations
+    aperture_a = ground_a + device_height_a
+    aperture_b = ground_b + device_height_b
+
+    # Straight optical LOS
+    los_absolute = aperture_a + (aperture_b - aperture_a) * (x / distance_m)
+
+    # Correct terrain for earth curvature.
+    effective_terrain = terrain + earth_bulge
+
+    # Geometrical LOS clearance
+    geometric_clearance = los_absolute - effective_terrain
+
+    # Fresnel zone
+    wavelength_m = wavelength_nm * 1e-9
+    fresnel_radius = np.zeros_like(x)
+
+    for i, distance in enumerate(x):
+        fresnel_radius[i] = calculate_fresnel_radius(
+            distance_m,
+            wavelength_m,
+            float(distance),
+        )
+
+    required_fresnel_clearance = (
+        fresnel_radius * fresnel_percentage / 100.0
+    )
+
+    clearance_after_fresnel = (
+        geometric_clearance - required_fresnel_clearance
+    )
+
+    # Ignore endpoints when looking for obstruction.
+    interior = np.ones(len(df), dtype=bool)
+    interior[0] = False
+    interior[-1] = False
+
+    interior_clearance = np.where(
+        interior,
+        geometric_clearance,
+        np.inf,
+    )
+
+    interior_fresnel_clearance = np.where(
+        interior,
+        clearance_after_fresnel,
+        np.inf,
+    )
 
     critical_los_index = int(np.argmin(interior_clearance))
     critical_fresnel_index = int(np.argmin(interior_fresnel_clearance))
@@ -524,7 +487,6 @@ with st.sidebar:
 if calculate:
 
     try:
-
         # ----------------------------------------------------
         # Distance & Bearing
         # ----------------------------------------------------
@@ -596,6 +558,9 @@ if calculate:
             wavelength_nm,
             fresnel_percentage,
         )
+
+        df = result["data"]
+
         # ----------------------------------------------------
         # Recommended Mounting Height Display
         # ----------------------------------------------------
@@ -618,8 +583,6 @@ if calculate:
                 f"To achieve full terrain clearance with a 1m safety buffer, "
                 f"increase mounting heights at both sites to at least **{rec_height:.2f} m**."
             )
-
-        df = result["data"]
 
         # ----------------------------------------------------
         # Results
