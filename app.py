@@ -899,7 +899,200 @@ if calculate:
 {critical['geometric_clearance_m']:.2f} m
 """
         )
+# ----------------------------------------------------
+# INTERACTIVE MAP
+# ----------------------------------------------------
 
+st.subheader("🗺️ Link Path Map")
+
+# Midpoint for map center
+map_lat = (latitude_a + latitude_b) / 2
+map_lon = (longitude_a + longitude_b) / 2
+
+map_fig = go.Figure()
+
+# A → B link line
+map_fig.add_trace(
+    go.Scattermapbox(
+        lat=[latitude_a, latitude_b],
+        lon=[longitude_a, longitude_b],
+        mode="lines",
+        line=dict(
+            width=4
+        ),
+        name="LC LYNC Link"
+    )
+)
+
+# Site A marker
+map_fig.add_trace(
+    go.Scattermapbox(
+        lat=[latitude_a],
+        lon=[longitude_a],
+        mode="markers+text",
+        marker=dict(
+            size=14
+        ),
+        text=["SITE A"],
+        textposition="top center",
+        name="Site A"
+    )
+)
+
+# Site B marker
+map_fig.add_trace(
+    go.Scattermapbox(
+        lat=[latitude_b],
+        lon=[longitude_b],
+        mode="markers+text",
+        marker=dict(
+            size=14
+        ),
+        text=["SITE B"],
+        textposition="top center",
+        name="Site B"
+    )
+)
+
+map_fig.update_layout(
+    mapbox=dict(
+        style="open-street-map",
+        center=dict(
+            lat=map_lat,
+            lon=map_lon
+        ),
+        zoom=15
+    ),
+    height=550,
+    margin=dict(
+        l=0,
+        r=0,
+        t=0,
+        b=0
+    ),
+    legend=dict(
+        orientation="h"
+    )
+)
+
+st.plotly_chart(
+    map_fig,
+    use_container_width=True
+)
+
+# ----------------------------------------------------
+# GOOGLE EARTH VERIFICATION
+# ----------------------------------------------------
+
+st.subheader("🌍 Google Earth Verification")
+
+st.write(
+    "Enter the distance and heading measured in Google Earth "
+    "to compare them with the calculator."
+)
+
+ge1, ge2 = st.columns(2)
+
+with ge1:
+
+    google_earth_distance = st.number_input(
+        "Google Earth distance (m)",
+        min_value=0.0,
+        value=274.43,
+        step=0.01
+    )
+
+with ge2:
+
+    google_earth_heading = st.number_input(
+        "Google Earth heading (°)",
+        min_value=0.0,
+        max_value=360.0,
+        value=199.59,
+        step=0.01
+    )
+
+distance_difference = (
+    distance_m
+    - google_earth_distance
+)
+
+distance_difference_abs = abs(
+    distance_difference
+)
+
+distance_difference_percent = (
+    distance_difference_abs
+    / google_earth_distance
+    * 100
+    if google_earth_distance > 0
+    else 0
+)
+
+heading_difference = abs(
+    bearing
+    - google_earth_heading
+)
+
+# Handle circular bearing difference
+if heading_difference > 180:
+    heading_difference = (
+        360 - heading_difference
+    )
+
+v1, v2, v3, v4 = st.columns(4)
+
+v1.metric(
+    "Tool Distance",
+    f"{distance_m:.2f} m"
+)
+
+v2.metric(
+    "Google Earth",
+    f"{google_earth_distance:.2f} m"
+)
+
+v3.metric(
+    "Distance Difference",
+    f"{distance_difference_abs:.2f} m"
+)
+
+v4.metric(
+    "Difference %",
+    f"{distance_difference_percent:.2f}%"
+)
+
+h1, h2 = st.columns(2)
+
+h1.metric(
+    "Tool Heading",
+    f"{bearing:.2f}°"
+)
+
+h2.metric(
+    "Heading Difference",
+    f"{heading_difference:.2f}°"
+)
+
+if distance_difference_percent <= 1:
+
+    st.success(
+        "✓ Distance agrees with Google Earth within 1%."
+    )
+
+elif distance_difference_percent <= 3:
+
+    st.warning(
+        "⚠ Distance differs by more than 1%. "
+        "Check that both tools use exactly the same coordinates."
+    )
+
+else:
+
+    st.error(
+        "✗ Significant distance difference. "
+        "Verify Site A and Site B coordinates."
+    )
         # ----------------------------------------------------
         # Terrain graph
         # ----------------------------------------------------
