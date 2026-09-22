@@ -651,7 +651,7 @@ if calculate:
 
         # A → B link line
         map_fig.add_trace(
-            go.Scattermapbox(
+            go.Scattermap(
                 lat=[latitude_a, latitude_b],
                 lon=[longitude_a, longitude_b],
                 mode="lines",
@@ -662,7 +662,7 @@ if calculate:
 
         # Site A marker
         map_fig.add_trace(
-            go.Scattermapbox(
+            go.Scattermap(
                 lat=[latitude_a],
                 lon=[longitude_a],
                 mode="markers+text",
@@ -675,7 +675,7 @@ if calculate:
 
         # Site B marker
         map_fig.add_trace(
-            go.Scattermapbox(
+            go.Scattermap(
                 lat=[latitude_b],
                 lon=[longitude_b],
                 mode="markers+text",
@@ -687,7 +687,7 @@ if calculate:
         )
 
         map_fig.update_layout(
-            mapbox=dict(
+            map=dict(
                 style="open-street-map",
                 center=dict(lat=map_lat, lon=map_lon),
                 zoom=15
