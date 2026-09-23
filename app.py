@@ -1,992 +1,246 @@
 import math
-import time
+import requests
 import numpy as np
 import pandas as pd
-import requests
 import streamlit as st
 import plotly.graph_objects as go
+import folium
+from streamlit_folium import st_folium
 
-
-# ============================================================
-# PAGE CONFIGURATION
-# ============================================================
-
-st.set_page_config(
-    page_title="Velmenni LC LYNC LOS Feasibility",
-    page_icon="📡",
-    layout="wide",
-)
-
-st.title("📡 Velmenni LC LYNC™ LiFi LOS Feasibility Tool")
-st.caption(
-    "Preliminary terrain-based feasibility analysis for optical wireless / LiFi links"
-)
-
-
-# ============================================================
-# CONSTANTS
-# ============================================================
+st.set_page_config(page_title="Velmenni LC LYNC LOS V2", page_icon="📡", layout="wide")
 
 EARTH_RADIUS_M = 6_371_000.0
 
-
-# ============================================================
-# GEOGRAPHICAL FUNCTIONS
-# ============================================================
-
 def haversine_distance(lat1, lon1, lat2, lon2):
-    """
-    Calculate great-circle distance between two GPS coordinates.
-    Returns distance in metres.
-    """
-    lat1_rad = math.radians(lat1)
-    lat2_rad = math.radians(lat2)
-
-    dlat = math.radians(lat2 - lat1)
-    dlon = math.radians(lon2 - lon1)
-
-    a = (
-        math.sin(dlat / 2) ** 2
-        + math.cos(lat1_rad)
-        * math.cos(lat2_rad)
-        * math.sin(dlon / 2) ** 2
-    )
-
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-    return EARTH_RADIUS_M * c
-
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2-lat1), math.radians(lon2-lon1)
+    a = math.sin(dp/2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
+    return EARTH_RADIUS_M * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
 
 def initial_bearing(lat1, lon1, lat2, lon2):
-    """
-    Calculate initial bearing from Site A to Site B.
-    """
-    lat1_rad = math.radians(lat1)
-    lat2_rad = math.radians(lat2)
-
-    dlon = math.radians(lon2 - lon1)
-
-    x = math.sin(dlon) * math.cos(lat2_rad)
-
-    y = (
-        math.cos(lat1_rad) * math.sin(lat2_rad)
-        - math.sin(lat1_rad)
-        * math.cos(lat2_rad)
-        * math.cos(dlon)
-    )
-
-    bearing = math.degrees(math.atan2(x, y))
-
-    return (bearing + 360) % 360
-
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2-lon1)
+    x = math.sin(dl)*math.cos(p2)
+    y = math.cos(p1)*math.sin(p2) - math.sin(p1)*math.cos(p2)*math.cos(dl)
+    return (math.degrees(math.atan2(x,y))+360)%360
 
 def destination_point(lat, lon, bearing_deg, distance_m):
-    """
-    Calculate a GPS point at a given distance and bearing.
-    """
-    lat_rad = math.radians(lat)
-    lon_rad = math.radians(lon)
-    bearing_rad = math.radians(bearing_deg)
-
-    angular_distance = distance_m / EARTH_RADIUS_M
-
-    new_lat = math.asin(
-        math.sin(lat_rad) * math.cos(angular_distance)
-        + math.cos(lat_rad)
-        * math.sin(angular_distance)
-        * math.cos(bearing_rad)
-    )
-
-    new_lon = lon_rad + math.atan2(
-        math.sin(bearing_rad)
-        * math.sin(angular_distance)
-        * math.cos(lat_rad),
-        math.cos(angular_distance)
-        - math.sin(lat_rad) * math.sin(new_lat),
-    )
-
-    new_lon = (math.degrees(new_lon) + 540) % 360 - 180
-
-    return math.degrees(new_lat), new_lon
-
-
-# ============================================================
-# ELEVATION API
-# ============================================================
+    p, l, b = map(math.radians, [lat, lon, bearing_deg])
+    a = distance_m/EARTH_RADIUS_M
+    np_lat = math.asin(math.sin(p)*math.cos(a)+math.cos(p)*math.sin(a)*math.cos(b))
+    np_lon = l + math.atan2(math.sin(b)*math.sin(a)*math.cos(p),
+                            math.cos(a)-math.sin(p)*math.sin(np_lat))
+    np_lon = (math.degrees(np_lon)+540)%360-180
+    return math.degrees(np_lat), np_lon
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_elevations(points):
-    """
-    Retrieve elevation values using the Open-Meteo Elevation API.
-    points: list of (latitude, longitude)
-    """
-    lats = [float(lat) for lat, _ in points]
-    lons = [float(lon) for _, lon in points]
+def get_elevations(coords):
+    lats = ",".join(f"{p[0]:.7f}" for p in coords)
+    lons = ",".join(f"{p[1]:.7f}" for p in coords)
+    r = requests.get("https://api.open-meteo.com/v1/elevation",
+                     params={"latitude": lats, "longitude": lons}, timeout=60)
+    r.raise_for_status()
+    data = r.json()
+    if isinstance(data, list):
+        return [float(x["elevation"]) for x in data]
+    elev = data.get("elevation")
+    if isinstance(elev, list):
+        return [float(x) for x in elev]
+    return [float(elev)] * len(coords)
 
-    url = "https://api.open-meteo.com/v1/elevation"
-    params = {
-        "latitude": ",".join(map(str, lats)),
-        "longitude": ",".join(map(str, lons)),
-    }
-
-    response = requests.get(
-        url,
-        params=params,
-        timeout=60,
-    )
-
-    response.raise_for_status()
-    data = response.json()
-
-    if "elevation" not in data:
-        raise RuntimeError("Elevation API returned an unexpected response.")
-
-    return [float(e) if e is not None else np.nan for e in data["elevation"]]
-
-
-def get_terrain_profile(
-    lat1,
-    lon1,
-    lat2,
-    lon2,
-    distance_m,
-    sample_points,
-):
-    """
-    Generate intermediate GPS points and obtain terrain elevation.
-    """
-    bearing = initial_bearing(
-        lat1,
-        lon1,
-        lat2,
-        lon2,
-    )
-
-    distances = np.linspace(
-        0,
-        distance_m,
-        sample_points,
-    )
-
-    coordinates = []
-
-    for distance in distances:
-        lat, lon = destination_point(
-            lat1,
-            lon1,
-            bearing,
-            float(distance),
-        )
-
-        coordinates.append((lat, lon))
-
-    # Keep requests reasonably sized.
-    batch_size = 100
+def terrain_profile(lat1, lon1, lat2, lon2, distance_m, samples):
+    bearing = initial_bearing(lat1, lon1, lat2, lon2)
+    distances = np.linspace(0, distance_m, samples)
+    coords = [destination_point(lat1, lon1, bearing, float(d)) for d in distances]
     elevations = []
+    for i in range(0, len(coords), 100):
+        elevations.extend(get_elevations(coords[i:i+100]))
+    return pd.DataFrame({
+        "distance_m": distances,
+        "latitude": [c[0] for c in coords],
+        "longitude": [c[1] for c in coords],
+        "terrain_elevation_m": elevations
+    })
 
-    for start in range(0, len(coordinates), batch_size):
-        batch = coordinates[start : start + batch_size]
-        batch_elevations = get_elevations(batch)
-        elevations.extend(batch_elevations)
+def earth_bulge(x, D):
+    return x*(D-x)/(2*EARTH_RADIUS_M)
 
-        # Small delay between API batches.
-        if start + batch_size < len(coordinates):
-            time.sleep(0.2)
+def solve_required_a(df, ground_a, abs_b, beam_d):
+    D = float(df.distance_m.iloc[-1])
+    x = df.distance_m.to_numpy()
+    obstacle = df.terrain_elevation_m.to_numpy() + earth_bulge(x,D) + beam_d/2
+    frac = x/D
+    req = (obstacle-frac*abs_b)/(1-frac)
+    req[[0,-1]] = -np.inf
+    idx = int(np.argmax(req))
+    return max(0.0, float(req[idx]-ground_a)), idx
 
-    df = pd.DataFrame(
-        {
-            "distance_m": distances,
-            "latitude": [x[0] for x in coordinates],
-            "longitude": [x[1] for x in coordinates],
-            "terrain_elevation_m": elevations,
-        }
-    )
+def solve_required_b(df, ground_b, abs_a, beam_d):
+    D = float(df.distance_m.iloc[-1])
+    x = df.distance_m.to_numpy()
+    obstacle = df.terrain_elevation_m.to_numpy() + earth_bulge(x,D) + beam_d/2
+    frac = x/D
+    req = (obstacle-(1-frac)*abs_a)/frac
+    req[[0,-1]] = -np.inf
+    idx = int(np.argmax(req))
+    return max(0.0, float(req[idx]-ground_b)), idx
 
-    return df
+def analyze(df, ground_a, ground_b, height_a, height_b, beam_d):
+    D = float(df.distance_m.iloc[-1])
+    x = df.distance_m.to_numpy()
+    terrain = df.terrain_elevation_m.to_numpy()
+    curvature = earth_bulge(x,D)
+    abs_a, abs_b = ground_a+height_a, ground_b+height_b
+    center = abs_a + (abs_b-abs_a)*(x/D)
+    radius = beam_d/2
+    lower, upper = center-radius, center+radius
+    effective = terrain+curvature
+    clearance = lower-effective
+    test = clearance.copy()
+    test[[0,-1]] = np.inf
+    crit = int(np.argmin(test))
+    req_a, idx_a = solve_required_a(df,ground_a,abs_b,beam_d)
+    req_b, idx_b = solve_required_b(df,ground_b,abs_a,beam_d)
+    base_line = center
+    obstacle = effective+radius
+    delta = obstacle-base_line
+    delta[[0,-1]] = -np.inf
+    equal_delta = max(0.0,float(np.max(delta)))
+    out = df.copy()
+    out["earth_curvature_m"] = curvature
+    out["effective_terrain_m"] = effective
+    out["centerline_los_m"] = center
+    out["beam_lower_edge_m"] = lower
+    out["beam_upper_edge_m"] = upper
+    out["beam_clearance_m"] = clearance
+    return dict(df=out, critical_idx=crit, critical_clearance=float(clearance[crit]),
+                required_a=req_a, required_b=req_b,
+                equal_a=height_a+equal_delta, equal_b=height_b+equal_delta,
+                equal_delta=equal_delta, idx_a=idx_a, idx_b=idx_b)
 
-
-# ============================================================
-# FRESNEL CALCULATION
-# ============================================================
-
-def calculate_fresnel_radius(
-    distance_m,
-    wavelength_m,
-    distance_from_a,
-):
-    """
-    First Fresnel-zone radius.
-    r = sqrt(lambda * d1 * d2 / D)
-    """
-    d1 = distance_from_a
-    d2 = distance_m - distance_from_a
-
-    if d1 <= 0 or d2 <= 0:
-        return 0.0
-
-    return math.sqrt(wavelength_m * d1 * d2 / distance_m)
-
-
-# ============================================================
-# RECOMMENDED MOUNTING HEIGHT CALCULATION
-# ============================================================
-
-def calculate_min_mounting_heights(terrain_df, total_distance_m, clearance_margin_m=1.0):
-    """
-    Calculates the minimum equal mounting height required at both sites
-    to clear all terrain obstructions with a safety margin.
-    """
-    df = terrain_df.copy()
-    x = df["distance_m"].to_numpy()
-    terrain = df["terrain_elevation_m"].to_numpy()
-    
-    # Calculate Earth curvature
-    earth_bulge = x * (total_distance_m - x) / (2 * EARTH_RADIUS_M)
-    effective_terrain = terrain + earth_bulge
-    
-    ground_a = terrain[0]
-    ground_b = terrain[-1]
-    
-    # Exclude immediate endpoints (the sites themselves)
-    x_mid = x[1:-1]
-    eff_mid = effective_terrain[1:-1] + clearance_margin_m
-    
-    # Linear interpolation factor across path
-    fraction = x_mid / total_distance_m
-    
-    # Elevation of imaginary ground-to-ground line
-    ground_path = ground_a + fraction * (ground_b - ground_a)
-    
-    # Calculate height deficit along intermediate terrain
-    height_deficit = eff_mid - ground_path
-    
-    # Get maximum deficit needed
-    min_mount_height = max(0.0, float(np.max(height_deficit)))
-    
-    return min_mount_height
-
-
-# ============================================================
-# LOS ANALYSIS
-# ============================================================
-
-def analyze_los(
-    terrain_df,
-    device_height_a,
-    device_height_b,
-    wavelength_nm,
-    fresnel_percentage,
-):
-    """
-    Analyze terrain versus optical LOS.
-    """
-    df = terrain_df.copy()
-
-    distance_m = float(df["distance_m"].iloc[-1])
-    terrain = df["terrain_elevation_m"].to_numpy()
-    x = df["distance_m"].to_numpy()
-
-    # Earth curvature
-    earth_bulge = x * (distance_m - x) / (2 * EARTH_RADIUS_M)
-
-    # Endpoint ground elevations
-    ground_a = float(terrain[0])
-    ground_b = float(terrain[-1])
-
-    # Actual optical aperture elevations
-    aperture_a = ground_a + device_height_a
-    aperture_b = ground_b + device_height_b
-
-    # Straight optical LOS
-    los_absolute = aperture_a + (aperture_b - aperture_a) * (x / distance_m)
-
-    # Correct terrain for earth curvature.
-    effective_terrain = terrain + earth_bulge
-
-    # Geometrical LOS clearance
-    geometric_clearance = los_absolute - effective_terrain
-
-    # Fresnel zone
-    wavelength_m = wavelength_nm * 1e-9
-    fresnel_radius = np.zeros_like(x)
-
-    for i, distance in enumerate(x):
-        fresnel_radius[i] = calculate_fresnel_radius(
-            distance_m,
-            wavelength_m,
-            float(distance),
-        )
-
-    required_fresnel_clearance = (
-        fresnel_radius * fresnel_percentage / 100.0
-    )
-
-    clearance_after_fresnel = (
-        geometric_clearance - required_fresnel_clearance
-    )
-
-    # Ignore endpoints when looking for obstruction.
-    interior = np.ones(len(df), dtype=bool)
-    interior[0] = False
-    interior[-1] = False
-
-    interior_clearance = np.where(
-        interior,
-        geometric_clearance,
-        np.inf,
-    )
-
-    interior_fresnel_clearance = np.where(
-        interior,
-        clearance_after_fresnel,
-        np.inf,
-    )
-
-    critical_los_index = int(np.argmin(interior_clearance))
-    critical_fresnel_index = int(np.argmin(interior_fresnel_clearance))
-
-    minimum_los_clearance = float(geometric_clearance[critical_los_index])
-    minimum_fresnel_clearance = float(clearance_after_fresnel[critical_fresnel_index])
-
-    # Add calculated values to dataframe
-    df["earth_curvature_m"] = earth_bulge
-    df["effective_terrain_m"] = effective_terrain
-    df["los_elevation_m"] = los_absolute
-    df["geometric_clearance_m"] = geometric_clearance
-    df["fresnel_radius_m"] = fresnel_radius
-    df["required_fresnel_clearance_m"] = required_fresnel_clearance
-    df["clearance_after_fresnel_m"] = clearance_after_fresnel
-
-    return {
-        "data": df,
-        "ground_a": ground_a,
-        "ground_b": ground_b,
-        "aperture_a": aperture_a,
-        "aperture_b": aperture_b,
-        "minimum_los_clearance": minimum_los_clearance,
-        "minimum_fresnel_clearance": minimum_fresnel_clearance,
-        "critical_los_index": critical_los_index,
-        "critical_fresnel_index": critical_fresnel_index,
-        "critical_los_distance": float(x[critical_los_index]),
-        "critical_fresnel_distance": float(x[critical_fresnel_index]),
-        "critical_los_lat": float(df.iloc[critical_los_index]["latitude"]),
-        "critical_los_lon": float(df.iloc[critical_los_index]["longitude"]),
-        "max_fresnel_radius": float(np.max(fresnel_radius)),
-    }
-
-
-# ============================================================
-# SIDEBAR INPUTS
-# ============================================================
+st.title("📡 Velmenni LC LYNC™ LOS Feasibility V2")
+st.caption("Distance • Azimuth • Terrain LOS • Required mounting height • Satellite visual inspection")
 
 with st.sidebar:
-
     st.header("📍 Site A")
-
-    latitude_a = st.number_input(
-        "Latitude A",
-        value=6.922819,
-        format="%.7f",
-    )
-
-    longitude_a = st.number_input(
-        "Longitude A",
-        value=79.853370,
-        format="%.7f",
-    )
-
-    height_a = st.number_input(
-        "LC LYNC device height A above ground (m)",
-        min_value=0.0,
-        value=10.0,
-        step=0.5,
-    )
+    lat_a = st.number_input("Latitude A", value=19.1533240, format="%.7f")
+    lon_a = st.number_input("Longitude A", value=72.8509670, format="%.7f")
+    height_a = st.number_input("Current height A (m AGL)", min_value=0.0, value=10.0, step=0.5)
 
     st.divider()
-
     st.header("📍 Site B")
-
-    latitude_b = st.number_input(
-        "Latitude B",
-        value=6.935177,
-        format="%.7f",
-    )
-
-    longitude_b = st.number_input(
-        "Longitude B",
-        value=79.853672,
-        format="%.7f",
-    )
-
-    height_b = st.number_input(
-        "LC LYNC device height B above ground (m)",
-        min_value=0.0,
-        value=10.0,
-        step=0.5,
-    )
+    lat_b = st.number_input("Latitude B", value=19.1510150, format="%.7f")
+    lon_b = st.number_input("Longitude B", value=72.8500800, format="%.7f")
+    height_b = st.number_input("Current height B (m AGL)", min_value=0.0, value=10.0, step=0.5)
 
     st.divider()
+    st.header("🔦 Optical planning")
+    beam_d = st.select_slider("Maximum full beam diameter (m)", options=[2.0,2.5,3.0], value=3.0)
+    st.caption("Focal length is not required. Set the maximum beam envelope your optical design targets.")
+    samples = st.slider("Terrain samples", 50, 300, 120, 10)
+    run = st.button("🔍 ANALYZE LINK", type="primary", use_container_width=True)
 
-    st.header("📡 Optical Parameters")
-
-    wavelength_nm = st.number_input(
-        "Optical wavelength (nm)",
-        min_value=100.0,
-        max_value=2000.0,
-        value=850.0,
-        step=1.0,
-    )
-
-    beam_divergence = st.number_input(
-        "Beam divergence (°)",
-        min_value=0.01,
-        max_value=30.0,
-        value=1.0,
-        step=0.1,
-    )
-
-    optical_aperture = st.number_input(
-        "Optical aperture diameter (mm)",
-        min_value=1.0,
-        max_value=1000.0,
-        value=100.0,
-        step=1.0,
-    )
-
-    st.divider()
-
-    st.header("📐 Analysis")
-
-    fresnel_percentage = st.slider(
-        "Required first Fresnel clearance (%)",
-        min_value=0,
-        max_value=100,
-        value=60,
-        step=5,
-    )
-
-    sample_points = st.slider(
-        "Terrain sample points",
-        min_value=30,
-        max_value=300,
-        value=100,
-        step=10,
-    )
-
-    calculate = st.button(
-        "🔍 ANALYZE LINK",
-        type="primary",
-        use_container_width=True,
-    )
-
-
-# ============================================================
-# MAIN ANALYSIS
-# ============================================================
-
-if calculate:
-
+if run:
     try:
-        # ----------------------------------------------------
-        # Distance & Bearing
-        # ----------------------------------------------------
+        distance = haversine_distance(lat_a,lon_a,lat_b,lon_b)
+        azimuth = initial_bearing(lat_a,lon_a,lat_b,lon_b)
 
-        distance_m = haversine_distance(
-            latitude_a,
-            longitude_a,
-            latitude_b,
-            longitude_b,
-        )
+        with st.spinner("Retrieving terrain and calculating LOS..."):
+            df = terrain_profile(lat_a,lon_a,lat_b,lon_b,distance,samples)
 
-        bearing = initial_bearing(
-            latitude_a,
-            longitude_a,
-            latitude_b,
-            longitude_b,
-        )
+        df["terrain_elevation_m"] = df["terrain_elevation_m"].interpolate().bfill().ffill()
+        ground_a, ground_b = float(df.terrain_elevation_m.iloc[0]), float(df.terrain_elevation_m.iloc[-1])
+        res = analyze(df,ground_a,ground_b,height_a,height_b,beam_d)
+        df = res["df"]
+        crit = df.iloc[res["critical_idx"]]
 
-        st.subheader("📊 Link Summary")
+        st.subheader("📊 Link result")
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Distance",f"{distance:.2f} m")
+        c2.metric("Distance",f"{distance/1000:.3f} km")
+        c3.metric("Azimuth A → B",f"{azimuth:.2f}°")
+        c4.metric("Beam diameter",f"{beam_d:.1f} m")
 
-        c1, c2, c3, c4 = st.columns(4)
-
-        c1.metric(
-            "Link Distance",
-            f"{distance_m / 1000:.3f} km",
-        )
-
-        c2.metric(
-            "Azimuth A → B",
-            f"{bearing:.2f}°",
-        )
-
-        c3.metric(
-            "Wavelength",
-            f"{wavelength_nm:.0f} nm",
-        )
-
-        c4.metric(
-            "Beam Divergence",
-            f"{beam_divergence:.2f}°",
-        )
-
-        # ----------------------------------------------------
-        # Terrain retrieval
-        # ----------------------------------------------------
-
-        with st.spinner("Retrieving terrain elevation..."):
-            terrain_df = get_terrain_profile(
-                latitude_a,
-                longitude_a,
-                latitude_b,
-                longitude_b,
-                distance_m,
-                sample_points,
-            )
-
-        if terrain_df["terrain_elevation_m"].isna().all():
-            st.error("No terrain elevation data was returned.")
-            st.stop()
-
-        # ----------------------------------------------------
-        # LOS analysis
-        # ----------------------------------------------------
-
-        result = analyze_los(
-            terrain_df,
-            height_a,
-            height_b,
-            wavelength_nm,
-            fresnel_percentage,
-        )
-
-        df = result["data"]
-
-        # ----------------------------------------------------
-        # Recommended Mounting Height Display
-        # ----------------------------------------------------
-
-        rec_height = calculate_min_mounting_heights(
-            terrain_df, 
-            distance_m, 
-            clearance_margin_m=1.0 # 1 meter clearance safety margin
-        )
-
-        st.subheader("💡 Recommended Mounting Height")
-
-        if height_a >= rec_height and height_b >= rec_height:
-            st.success(
-                f"Your current mounting heights ({height_a:.1f} m / {height_b:.1f} m) "
-                f"are sufficient! Recommended minimum height for both sites is **{rec_height:.2f} m**."
-            )
+        if res["critical_clearance"] >= 0:
+            st.success(f"### 🟢 CURRENT BEAM PATH: CLEAR\nMinimum lower-edge clearance = {res['critical_clearance']:.2f} m")
         else:
-            st.warning(
-                f"To achieve full terrain clearance with a 1m safety buffer, "
-                f"increase mounting heights at both sites to at least **{rec_height:.2f} m**."
-            )
+            st.error(f"### 🔴 CURRENT BEAM PATH: BLOCKED\nMinimum lower-edge clearance = {res['critical_clearance']:.2f} m")
 
-        # ----------------------------------------------------
-        # Results
-        # ----------------------------------------------------
+        st.subheader("🏗️ Required mounting height")
+        h1,h2,h3 = st.columns(3)
+        h1.metric("Raise Site A only",f"{res['required_a']:.1f} m AGL")
+        h2.metric("Raise Site B only",f"{res['required_b']:.1f} m AGL")
+        h3.metric("Raise both equally",f"{res['equal_a']:.1f} / {res['equal_b']:.1f} m AGL")
 
-        st.subheader("🛰️ Terrain / LOS Result")
+        st.caption("The height solver uses a conservative full-beam envelope: beam radius = selected maximum diameter / 2 along the path.")
 
-        geometric_clearance = result["minimum_los_clearance"]
-        fresnel_clearance = result["minimum_fresnel_clearance"]
+        st.subheader("⚠️ Governing terrain point")
+        g1,g2,g3,g4 = st.columns(4)
+        g1.metric("Distance from A",f"{crit.distance_m:.1f} m")
+        g2.metric("Terrain",f"{crit.terrain_elevation_m:.1f} m")
+        g3.metric("Lower beam edge",f"{crit.beam_lower_edge_m:.1f} m")
+        g4.metric("Clearance",f"{crit.beam_clearance_m:.2f} m")
+        st.write(f"**Coordinates:** `{crit.latitude:.6f}, {crit.longitude:.6f}`")
 
-        # Overall status
-        los_status = "PASS" if geometric_clearance > 0 else "FAIL"
-        fresnel_status = "PASS" if fresnel_clearance >= 0 else "WARNING"
+        st.subheader("🛰️ Visual inspection map")
+        fmap = folium.Map(location=[(lat_a+lat_b)/2,(lon_a+lon_b)/2],zoom_start=16,control_scale=True,tiles=None)
+        folium.TileLayer("OpenStreetMap",name="Map").add_to(fmap)
+        folium.TileLayer(
+            tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+            attr="Esri World Imagery",name="Satellite").add_to(fmap)
+        folium.TileLayer(
+            tiles="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
+            attr="OpenTopoMap",name="Topographic").add_to(fmap)
+        folium.Marker([lat_a,lon_a],tooltip="SITE A",popup=f"Site A<br>Height {height_a:.1f} m AGL",
+                     icon=folium.Icon(color="blue",icon="signal")).add_to(fmap)
+        folium.Marker([lat_b,lon_b],tooltip="SITE B",popup=f"Site B<br>Height {height_b:.1f} m AGL",
+                     icon=folium.Icon(color="red",icon="signal")).add_to(fmap)
+        folium.PolyLine([[lat_a,lon_a],[lat_b,lon_b]],color="blue",weight=5,
+                        tooltip=f"LC LYNC path: {distance:.1f} m / {azimuth:.1f}°").add_to(fmap)
+        folium.CircleMarker([res["df"].iloc[res["critical_idx"]].latitude,res["df"].iloc[res["critical_idx"]].longitude],
+                            radius=7,color="red",fill=True,fill_opacity=0.9,
+                            tooltip="Governing terrain point").add_to(fmap)
+        folium.LayerControl(collapsed=False).add_to(fmap)
+        st_folium(fmap,use_container_width=True,height=560)
 
-        # Status cards
-        r1, r2, r3 = st.columns(3)
+        gm = f"https://www.google.com/maps/dir/?api=1&origin={lat_a},{lon_a}&destination={lat_b},{lon_b}"
+        st.markdown(f"[🌍 Open A → B path in Google Maps]({gm})")
+        st.caption("In-app satellite imagery uses Esri World Imagery. Google Maps is provided for external visual cross-check. Satellite imagery alone does not reliably give object heights.")
 
-        if los_status == "PASS":
-            r1.success(
-                f"### LOS: {los_status}\n"
-                f"Minimum clearance: {geometric_clearance:.2f} m"
-            )
-        else:
-            r1.error(
-                f"### LOS: {los_status}\n"
-                f"Minimum clearance: {geometric_clearance:.2f} m"
-            )
-
-        if fresnel_status == "PASS":
-            r2.success(
-                f"### FRESNEL: {fresnel_status}\n"
-                f"Minimum clearance: {fresnel_clearance:.2f} m"
-            )
-        else:
-            r2.warning(
-                f"### FRESNEL: {fresnel_status}\n"
-                f"Minimum clearance: {fresnel_clearance:.2f} m"
-            )
-
-        if los_status == "PASS" and fresnel_status == "PASS":
-            r3.success("### PRELIMINARY\nFEASIBLE")
-        elif los_status == "PASS":
-            r3.warning("### PRELIMINARY\nREVIEW REQUIRED")
-        else:
-            r3.error("### PRELIMINARY\nNOT FEASIBLE")
-
-        # ----------------------------------------------------
-        # Site elevation information
-        # ----------------------------------------------------
-
-        st.subheader("📍 Site Elevations")
-
-        e1, e2, e3, e4 = st.columns(4)
-
-        e1.metric("Ground A", f"{result['ground_a']:.1f} m")
-        e2.metric("Device A", f"{result['aperture_a']:.1f} m")
-        e3.metric("Ground B", f"{result['ground_b']:.1f} m")
-        e4.metric("Device B", f"{result['aperture_b']:.1f} m")
-
-        # ----------------------------------------------------
-        # Critical point
-        # ----------------------------------------------------
-
-        st.subheader("⚠️ Critical Terrain Point")
-
-        critical = df.iloc[result["critical_los_index"]]
-
-        st.write(
-            f"""
-**Distance from Site A:** {critical['distance_m']:.1f} m  
-**Coordinates:** {critical['latitude']:.6f}, {critical['longitude']:.6f}  
-**Terrain elevation:** {critical['terrain_elevation_m']:.1f} m  
-**LOS elevation:** {critical['los_elevation_m']:.1f} m  
-**Clearance:** {critical['geometric_clearance_m']:.2f} m
-"""
-        )
-
-        # ----------------------------------------------------
-        # INTERACTIVE MAP
-        # ----------------------------------------------------
-
-        st.subheader("🗺️ Link Path Map")
-
-        map_lat = (latitude_a + latitude_b) / 2
-        map_lon = (longitude_a + longitude_b) / 2
-
-        map_fig = go.Figure()
-
-        # A → B link line
-        map_fig.add_trace(
-            go.Scattermap(
-                lat=[latitude_a, latitude_b],
-                lon=[longitude_a, longitude_b],
-                mode="lines",
-                line=dict(width=4),
-                name="LC LYNC Link"
-            )
-        )
-
-        # Site A marker
-        map_fig.add_trace(
-            go.Scattermap(
-                lat=[latitude_a],
-                lon=[longitude_a],
-                mode="markers+text",
-                marker=dict(size=14),
-                text=["SITE A"],
-                textposition="top center",
-                name="Site A"
-            )
-        )
-
-        # Site B marker
-        map_fig.add_trace(
-            go.Scattermap(
-                lat=[latitude_b],
-                lon=[longitude_b],
-                mode="markers+text",
-                marker=dict(size=14),
-                text=["SITE B"],
-                textposition="top center",
-                name="Site B"
-            )
-        )
-
-        map_fig.update_layout(
-            map=dict(
-                style="open-street-map",
-                center=dict(lat=map_lat, lon=map_lon),
-                zoom=15
-            ),
-            height=550,
-            margin=dict(l=0, r=0, t=0, b=0),
-            legend=dict(orientation="h")
-        )
-
-        st.plotly_chart(map_fig, use_container_width=True)
-
-        # ----------------------------------------------------
-        # GOOGLE EARTH VERIFICATION
-        # ----------------------------------------------------
-
-        st.subheader("🌍 Google Earth Verification")
-
-        st.write(
-            "Enter the distance and heading measured in Google Earth "
-            "to compare them with the calculator."
-        )
-
-        ge1, ge2 = st.columns(2)
-
-        with ge1:
-            google_earth_distance = st.number_input(
-                "Google Earth distance (m)",
-                min_value=0.0,
-                value=274.43,
-                step=0.01
-            )
-
-        with ge2:
-            google_earth_heading = st.number_input(
-                "Google Earth heading (°)",
-                min_value=0.0,
-                max_value=360.0,
-                value=199.59,
-                step=0.01
-            )
-
-        distance_difference = distance_m - google_earth_distance
-        distance_difference_abs = abs(distance_difference)
-        distance_difference_percent = (
-            distance_difference_abs / google_earth_distance * 100
-            if google_earth_distance > 0
-            else 0
-        )
-
-        heading_difference = abs(bearing - google_earth_heading)
-
-        if heading_difference > 180:
-            heading_difference = 360 - heading_difference
-
-        v1, v2, v3, v4 = st.columns(4)
-
-        v1.metric("Tool Distance", f"{distance_m:.2f} m")
-        v2.metric("Google Earth", f"{google_earth_distance:.2f} m")
-        v3.metric("Distance Difference", f"{distance_difference_abs:.2f} m")
-        v4.metric("Difference %", f"{distance_difference_percent:.2f}%")
-
-        h1, h2 = st.columns(2)
-
-        h1.metric("Tool Heading", f"{bearing:.2f}°")
-        h2.metric("Heading Difference", f"{heading_difference:.2f}°")
-
-        if distance_difference_percent <= 1:
-            st.success("✓ Distance agrees with Google Earth within 1%.")
-        elif distance_difference_percent <= 3:
-            st.warning(
-                "⚠ Distance differs by more than 1%. "
-                "Check that both tools use exactly the same coordinates."
-            )
-        else:
-            st.error(
-                "✗ Significant distance difference. "
-                "Verify Site A and Site B coordinates."
-            )
-
-        # ----------------------------------------------------
-        # Terrain graph
-        # ----------------------------------------------------
-
-        st.subheader("⛰️ Terrain / Optical LOS Profile")
-
+        st.subheader("⛰️ Terrain / optical beam profile")
         fig = go.Figure()
+        fig.add_trace(go.Scatter(x=df.distance_m,y=df.terrain_elevation_m,mode="lines",name="Terrain"))
+        fig.add_trace(go.Scatter(x=df.distance_m,y=df.centerline_los_m,mode="lines",name="Optical centerline"))
+        fig.add_trace(go.Scatter(x=df.distance_m,y=df.beam_lower_edge_m,mode="lines",name="Lower beam edge"))
+        fig.add_trace(go.Scatter(x=df.distance_m,y=df.beam_upper_edge_m,mode="lines",name="Upper beam edge"))
+        fig.add_trace(go.Scatter(x=[crit.distance_m],y=[crit.terrain_elevation_m],mode="markers",
+                                 marker=dict(size=12),name="Governing point"))
+        fig.update_layout(height=520,xaxis_title="Distance from Site A (m)",yaxis_title="Elevation (m)",
+                          hovermode="x unified",legend=dict(orientation="h"))
+        st.plotly_chart(fig,use_container_width=True)
 
-        fig.add_trace(
-            go.Scatter(
-                x=df["distance_m"],
-                y=df["terrain_elevation_m"],
-                mode="lines",
-                name="Terrain",
-            )
-        )
+        summary = pd.DataFrame([
+            ["Distance (m)",distance],["Azimuth (deg)",azimuth],
+            ["Ground elevation A (m)",ground_a],["Ground elevation B (m)",ground_b],
+            ["Current A height AGL (m)",height_a],["Current B height AGL (m)",height_b],
+            ["Maximum beam diameter (m)",beam_d],["Current minimum beam clearance (m)",res["critical_clearance"]],
+            ["Required A height if B fixed (m AGL)",res["required_a"]],
+            ["Required B height if A fixed (m AGL)",res["required_b"]],
+            ["Equal-rise A height (m AGL)",res["equal_a"]],["Equal-rise B height (m AGL)",res["equal_b"]],
+            ["Governing point distance from A (m)",crit.distance_m],
+        ],columns=["Parameter","Value"])
 
-        fig.add_trace(
-            go.Scatter(
-                x=df["distance_m"],
-                y=df["los_elevation_m"],
-                mode="lines",
-                name="Optical LOS",
-            )
-        )
+        st.subheader("📌 Survey summary")
+        st.dataframe(summary,use_container_width=True,hide_index=True)
+        st.download_button("⬇️ Download LOS terrain CSV",df.to_csv(index=False).encode("utf-8"),
+                           "LC_LYNC_LOS_V2_profile.csv","text/csv")
 
-        fig.add_trace(
-            go.Scatter(
-                x=df["distance_m"],
-                y=df["los_elevation_m"] - df["required_fresnel_clearance_m"],
-                mode="lines",
-                name=f"LOS - {fresnel_percentage}% Fresnel",
-            )
-        )
-
-        # Critical point
-        fig.add_trace(
-            go.Scatter(
-                x=[critical["distance_m"]],
-                y=[critical["terrain_elevation_m"]],
-                mode="markers",
-                marker=dict(size=12),
-                name="Critical Point",
-            )
-        )
-
-        fig.update_layout(
-            title="LC LYNC Terrain / LOS / Fresnel Profile",
-            xaxis_title="Distance from Site A (m)",
-            yaxis_title="Elevation (m)",
-            hovermode="x unified",
-            height=550,
-        )
-
-        st.plotly_chart(fig, use_container_width=True)
-
-        # ----------------------------------------------------
-        # Link geometry
-        # ----------------------------------------------------
-
-        st.subheader("📐 Link Geometry")
-
-        g1, g2, g3 = st.columns(3)
-
-        g1.metric("Max 1st Fresnel Radius", f"{result['max_fresnel_radius']:.3f} m")
-        g2.metric("Device A Elevation", f"{result['aperture_a']:.2f} m")
-        g3.metric("Device B Elevation", f"{result['aperture_b']:.2f} m")
-
-        # ----------------------------------------------------
-        # Optical beam information
-        # ----------------------------------------------------
-
-        st.subheader("🔦 Optical Beam Estimate")
-
-        divergence_rad = math.radians(beam_divergence)
-        beam_diameter_m = 2 * distance_m * math.tan(divergence_rad / 2)
-
-        ob1, ob2, ob3 = st.columns(3)
-
-        ob1.metric("Optical Aperture", f"{optical_aperture:.1f} mm")
-        ob2.metric("Estimated Beam Diameter", f"{beam_diameter_m:.2f} m")
-        ob3.metric("Beam Divergence", f"{beam_divergence:.2f}°")
-
-        # ----------------------------------------------------
-        # CSV export
-        # ----------------------------------------------------
-
-        st.subheader("📥 Export Survey Data")
-
-        csv_data = df.to_csv(index=False).encode("utf-8")
-
-        st.download_button(
-            label="⬇️ Download LOS Survey CSV",
-            data=csv_data,
-            file_name="LC_LYNC_LOS_Survey.csv",
-            mime="text/csv",
-        )
-
-        # ----------------------------------------------------
-        # Engineering limitation
-        # ----------------------------------------------------
-
-        st.warning(
-            """
-### ⚠️ Important Engineering Limitation
-
-This calculator currently performs **terrain-based preliminary feasibility**.
-
-The elevation dataset does NOT guarantee detection of:
-- Trees
-- Buildings
-- Poles
-- Cranes
-- Towers
-- Transmission lines
-- Temporary structures
-- Other narrow optical obstructions
-
-For an 850 nm LC LYNC optical link, the final installation should therefore
-include a physical/satellite site survey and confirmation of the actual optical
-path.
-
-**PASS means terrain-based preliminary feasibility, not final installation approval.**
-"""
-        )
-
-    except requests.exceptions.RequestException as error:
+        st.warning("Preliminary planning only: visually/physically verify buildings, trees, poles, cranes and other structures. The 2–3 m beam is a planning envelope and should be checked against measured optical performance.")
+    except requests.exceptions.RequestException as e:
         st.error("Elevation service could not be reached.")
-        st.code(str(error))
-        st.info("Please try the analysis again after a short interval.")
-
-    except Exception as error:
+        st.code(str(e))
+    except Exception as e:
         st.error("Analysis failed.")
-        st.exception(error)
-
-
-# ============================================================
-# INITIAL SCREEN
-# ============================================================
-
+        st.exception(e)
 else:
-
-    st.info(
-        """
-Enter the GPS coordinates and device mounting heights
-in the sidebar, then click **ANALYZE LINK**.
-"""
-    )
-
-    st.markdown(
-        """
-## What this version calculates
-
-### 📍 Link
-- Site A GPS
-- Site B GPS
-- Distance
-- Azimuth
-
-### ⛰️ Terrain
-- Intermediate GPS points
-- Terrain elevation
-- Terrain profile
-- Earth curvature
-
-### 👁️ LOS
-- Actual device aperture elevation
-- Straight optical path
-- Minimum terrain clearance
-- Critical terrain point
-
-### 📐 Fresnel
-- 850 nm wavelength
-- First Fresnel-zone radius
-- Configurable clearance percentage
-
-### 📡 Optical
-- Beam divergence
-- Optical aperture
-- Approximate beam diameter
-
-### 📥 Export
-- Complete terrain/LOS CSV
-
----
-
-### Recommended interpretation
-
-**PASS**
-Terrain-based LOS is clear and the selected Fresnel criterion is satisfied.
-
-**WARNING**
-Geometric LOS is clear, but the selected Fresnel criterion is not satisfied.
-
-**FAIL**
-Terrain intersects the optical LOS centerline.
-
-**Important:** This is a preliminary planning tool. Trees, buildings,
-poles and other narrow objects require separate verification.
-"""
-    )
+    st.info("Enter Site A/B coordinates and current heights, select the maximum 2–3 m beam diameter, then click ANALYZE LINK.")
