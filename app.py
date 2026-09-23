@@ -138,9 +138,12 @@ with st.sidebar:
     beam_d = st.select_slider("Maximum full beam diameter (m)", options=[2.0,2.5,3.0], value=3.0)
     st.caption("Focal length is not required. Set the maximum beam envelope your optical design targets.")
     samples = st.slider("Terrain samples", 50, 300, 120, 10)
-    run = st.button("🔍 ANALYZE LINK", type="primary", use_container_width=True)
+    analyze_clicked = st.button("🔍 ANALYZE LINK", type="primary", use_container_width=True)
 
-if run:
+if analyze_clicked:
+    st.session_state["los_analysis_requested"] = True
+
+if st.session_state.get("los_analysis_requested", False):
     try:
         distance = haversine_distance(lat_a,lon_a,lat_b,lon_b)
         azimuth = initial_bearing(lat_a,lon_a,lat_b,lon_b)
