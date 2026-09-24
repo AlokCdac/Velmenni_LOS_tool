@@ -203,8 +203,19 @@ st.header("📚 Multi-Survey Excel Processor")
 st.write("Upload an Excel file containing multiple survey rows. The tool calculates distance, azimuth, terrain/LOS and required heights for every row, then produces an Excel survey report.")
 
 template = survey_template()
-st.download_button("⬇️ Download Excel input template",template.to_excel(index=False,engine="openpyxl"),"LC_LYNC_Multi_Survey_Template.xlsx",
-                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# Streamlit download_button needs file bytes, not the return value of
+# DataFrame.to_excel(). Build the XLSX in memory first.
+template_buf = io.BytesIO()
+with pd.ExcelWriter(template_buf, engine="openpyxl") as writer:
+    template.to_excel(writer, index=False, sheet_name="Survey Input Template")
+
+st.download_button(
+    "⬇️ Download Excel input template",
+    data=template_buf.getvalue(),
+    file_name="LC_LYNC_Multi_Survey_Template.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+)
 
 up=st.file_uploader("Upload multi-survey Excel (.xlsx)",type=["xlsx"])
 if up:
@@ -258,6 +269,7 @@ if up:
             with pd.ExcelWriter(buf,engine="openpyxl") as writer:
                 results_df.to_excel(writer,index=False,sheet_name="Survey Report")
                 inp.to_excel(writer,index=False,sheet_name="Input Data")
+            buf.seek(0)
             st.download_button("⬇️ Download Multi-Survey Excel Report",buf.getvalue(),
                                "LC_LYNC_Multi_Survey_Report.xlsx",
                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
