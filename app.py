@@ -136,9 +136,9 @@ if st.session_state.get("run",False):
         c1.metric("Distance",f"{D:.2f} m"); c2.metric("Azimuth A → B",f"{az:.2f}°")
         c3.metric("Beam diameter",f"{beam:.1f} m"); c4.metric("Minimum clearance",f"{crit.beam_clearance_m:.2f} m")
         if crit.beam_clearance_m >= 0:
-    st.success("### 🟢 CURRENT BEAM PATH: CLEAR")
-else:
-    st.error("### 🔴 CURRENT BEAM PATH: BLOCKED")
+            st.success("### 🟢 CURRENT BEAM PATH: CLEAR")
+        else:
+            st.error("### 🔴 CURRENT BEAM PATH: BLOCKED")
 
         st.subheader("🏗️ Required mounting height")
         q1,q2,q3=st.columns(3)
