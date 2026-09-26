@@ -10,17 +10,6 @@ from streamlit_folium import st_folium
 import streamlit as st
 
 st.set_page_config(page_title="LC LYNC LOS Feasibility", page_icon="📡", layout="wide")
-
-# Insert CSS right here:
-st.markdown("""
-    <style>
-    /* Hide top-right action buttons (GitHub link, settings, deploy) */
-    [data-testid="stToolbar"] { display: none !important; }
-    #MainMenu { display: none !important; }
-    footer { display: none !important; }
-    .stDeployButton { display: none !important; }
-    </style>
-""", unsafe_allow_html=True)
 R = 6371000.0  # Earth radius in meters
 ...
 
