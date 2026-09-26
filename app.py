@@ -7,8 +7,23 @@ import plotly.graph_objects as go
 import folium
 from streamlit_folium import st_folium
 
+import streamlit as st
+
 st.set_page_config(page_title="LC LYNC LOS Feasibility", page_icon="📡", layout="wide")
+
+# Insert CSS right here:
+st.markdown("""
+    <style>
+    #MainMenu {visibility: hidden;}
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    .stDeployButton {display:none;}
+    [data-testid="stToolbar"] {visibility: hidden; display: none;}
+    </style>
+""", unsafe_allow_html=True)
+
 R = 6371000.0  # Earth radius in meters
+...
 
 # ==========================================
 # GEOMETRY & ELEVATION HELPERS
