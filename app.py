@@ -9,33 +9,7 @@ from streamlit_folium import st_folium
 
 import streamlit as st
 
-st.set_page_config(page_title="LC LYNC LOS Feasibility", page_icon="📡", layout="wide"),
-st.markdown("""
-    <style>
-    /* Completely removes the entire Streamlit header bar containing the GitHub link */
-    header[data-testid="stHeader"] {
-        display: none !important;
-        visibility: hidden !important;
-        height: 0px !important;
-    }
-    
-    /* Removes GitHub and Community Cloud floating badges */
-    [data-testid="stToolbar"] {
-        display: none !important;
-    }
-    .stAppDeployButton {
-        display: none !important;
-    }
-    footer {
-        display: none !important;
-    }
-    
-    /* Brings the top title up smoothly */
-    .block-container {
-        padding-top: 1.5rem !important;
-    }
-    </style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="LC LYNC LOS Feasibility", page_icon="📡", layout="wide")
 R = 6371000.0  # Earth radius in meters
 ...
 
