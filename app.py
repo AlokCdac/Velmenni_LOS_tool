@@ -14,16 +14,22 @@ st.set_page_config(page_title="LC LYNC LOS Feasibility", page_icon="📡", layou
 # Insert CSS right here:
 st.markdown("""
     <style>
-    #MainMenu {visibility: hidden;}
-    header {visibility: hidden;}
-    footer {visibility: hidden;}
-    .stDeployButton {display:none;}
-    [data-testid="stToolbar"] {visibility: hidden; display: none;}
+    /* Hide the 3-dots menu, fork button, and toolbar containing GitHub links */
+    #MainMenu {visibility: hidden !important; display: none !important;}
+    footer {visibility: hidden !important; display: none !important;}
+    .stDeployButton {display: none !important;}
+    [data-testid="stToolbar"] {display: none !important;}
+    [data-testid="stDecoration"] {display: none !important;}
+    [data-testid="stStatusWidget"] {display: none !important;}
+
+    /* KEEP the sidebar open button visible on mobile */
+    [data-testid="stSidebarCollapsedControl"] {
+        display: block !important;
+        visibility: visible !important;
+        z-index: 999999 !important;
+    }
     </style>
 """, unsafe_allow_html=True)
-
-R = 6371000.0  # Earth radius in meters
-...
 
 # ==========================================
 # GEOMETRY & ELEVATION HELPERS
