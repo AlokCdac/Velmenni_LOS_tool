@@ -1,5 +1,5 @@
-
-import math, io, requests
+import math, io, html
+import requests
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -7,292 +7,428 @@ import plotly.graph_objects as go
 import folium
 from streamlit_folium import st_folium
 
-st.set_page_config(page_title="Velmenni LC LYNC LOS Feasibility V3", page_icon="📡", layout="wide")
-R = 6371000.0
+st.set_page_config(page_title="LC LYNC LOS Feasibility", page_icon="📡", layout="wide")
+R = 6371000.0  # Earth radius in meters
 
-def hav(a,b,c,d):
-    p1,p2=map(math.radians,[a,c]); dp=math.radians(c-a); dl=math.radians(d-b)
-    x=math.sin(dp/2)**2+math.cos(p1)*math.cos(p2)*math.sin(dl/2)**2
-    return 2*R*math.atan2(math.sqrt(x),math.sqrt(1-x))
+# ==========================================
+# GEOMETRY & ELEVATION HELPERS
+# ==========================================
+def hav(a, b, c, d):
+    p1, p2 = map(math.radians, [a, c])
+    dp = math.radians(c - a)
+    dl = math.radians(d - b)
+    x = math.sin(dp / 2)**2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2)**2
+    return 2 * R * math.atan2(math.sqrt(x), math.sqrt(1 - x))
 
-def bearing(a,b,c,d):
-    p1,p2=map(math.radians,[a,c]); dl=math.radians(d-b)
-    x=math.sin(dl)*math.cos(p2)
-    y=math.cos(p1)*math.sin(p2)-math.sin(p1)*math.cos(p2)*math.cos(dl)
-    return (math.degrees(math.atan2(x,y))+360)%360
+def bearing(a, b, c, d):
+    p1, p2 = map(math.radians, [a, c])
+    dl = math.radians(d - b)
+    x = math.sin(dl) * math.cos(p2)
+    y = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+    return (math.degrees(math.atan2(x, y)) + 360) % 360
 
-def point(lat,lon,b,dist):
-    p,l,br=map(math.radians,[lat,lon,b]); q=dist/R
-    la=math.asin(math.sin(p)*math.cos(q)+math.cos(p)*math.sin(q)*math.cos(br))
-    lo=l+math.atan2(math.sin(br)*math.sin(q)*math.cos(p),math.cos(q)-math.sin(p)*math.sin(la))
-    return math.degrees(la),(math.degrees(lo)+540)%360-180
+def point_at_dist(lat, lon, b, dist):
+    p, l, br = map(math.radians, [lat, lon, b])
+    q = dist / R
+    la = math.asin(math.sin(p) * math.cos(q) + math.cos(p) * math.sin(q) * math.cos(br))
+    lo = l + math.atan2(math.sin(br) * math.sin(q) * math.cos(p), math.cos(q) - math.sin(p) * math.sin(la))
+    return math.degrees(la), (math.degrees(lo) + 540) % 360 - 180
 
 @st.cache_data(ttl=3600)
-def elev(coords):
-    r=requests.get("https://api.open-meteo.com/v1/elevation",
-        params={"latitude":",".join(f"{x[0]:.7f}" for x in coords),
-                "longitude":",".join(f"{x[1]:.7f}" for x in coords)},timeout=60)
-    r.raise_for_status(); j=r.json()
-    if isinstance(j,list): return [float(x["elevation"]) for x in j]
+def fetch_elevation_batch(coords_tuple):
+    # Open-Meteo accepts comma-separated coordinate lists
+    lats = ",".join(f"{c[0]:.6f}" for c in coords_tuple)
+    lons = ",".join(f"{c[1]:.6f}" for c in coords_tuple)
+    r = requests.get(
+        "https://api.open-meteo.com/v1/elevation",
+        params={"latitude": lats, "longitude": lons},
+        timeout=45
+    )
+    r.raise_for_status()
+    j = r.json()
+    if isinstance(j, list):
+        return [float(x["elevation"]) for x in j]
     return [float(x) for x in j["elevation"]]
 
-def profile(a,b,c,d,n):
-    D=hav(a,b,c,d); br=bearing(a,b,c,d); ds=np.linspace(0,D,n)
-    pts=[point(a,b,br,float(x)) for x in ds]
-    es=[]
-    for i in range(0,n,100): es += elev(pts[i:i+100])
-    return D,br,pd.DataFrame({"distance_m":ds,"latitude":[x[0] for x in pts],
-        "longitude":[x[1] for x in pts],"terrain_elevation_m":es})
+def compute_profile(a, b, c, d, n=100):
+    dist = hav(a, b, c, d)
+    az_ab = bearing(a, b, c, d)
+    az_ba = (az_ab + 180) % 360
+    ds = np.linspace(0, dist, n)
+    pts = [point_at_dist(a, b, az_ab, float(x)) for x in ds]
+    
+    # Query in batches of 100 points
+    elevs = []
+    for i in range(0, n, 100):
+        elevs += fetch_elevation_batch(tuple(pts[i:i+100]))
+    
+    df = pd.DataFrame({
+        "distance_m": ds,
+        "latitude": [p[0] for p in pts],
+        "longitude": [p[1] for p in pts],
+        "terrain_elevation_m": elevs
+    })
+    df["terrain_elevation_m"] = df["terrain_elevation_m"].interpolate().bfill().ffill()
+    return dist, az_ab, az_ba, df
 
-def calc(df,ha,hb,ga,gb,beam):
-    D=float(df.distance_m.iloc[-1]); x=df.distance_m.to_numpy(); t=df.terrain_elevation_m.to_numpy()
-    bulge=x*(D-x)/(2*R); A=ga+ha; B=gb+hb
-    center=A+(B-A)*x/D; lower=center-beam/2; upper=center+beam/2
-    clear=lower-(t+bulge); test=clear.copy(); test[[0,-1]]=np.inf; ci=int(np.argmin(test))
-    obs=t+bulge+beam/2; f=x/D
-    ra=(obs-f*B)/(1-f); ra[[0,-1]]=-np.inf; ia=int(np.argmax(ra))
-    rb=(obs-(1-f)*A)/f; rb[[0,-1]]=-np.inf; ib=int(np.argmax(rb))
-    delta=obs-center; delta[[0,-1]]=-np.inf; de=max(0,float(np.max(delta)))
-    out=df.copy(); out["earth_curvature_m"]=bulge; out["centerline_los_m"]=center
-    out["beam_lower_edge_m"]=lower; out["beam_upper_edge_m"]=upper; out["beam_clearance_m"]=clear
-    return out,ci,max(0,float(ra[ia]-ga)),max(0,float(rb[ib]-gb)),ha+de,hb+de
+def analyze_los(df, ha, hb, ga, gb, beam):
+    D = float(df.distance_m.iloc[-1])
+    x = df.distance_m.to_numpy()
+    t = df.terrain_elevation_m.to_numpy()
+    bulge = x * (D - x) / (2 * R)
+    alt_a = ga + ha
+    alt_b = gb + hb
+    center = alt_a + (alt_b - alt_a) * x / D
+    lower = center - beam / 2
+    upper = center + beam / 2
+    clear = lower - (t + bulge)
+    
+    test = clear.copy()
+    test[[0, -1]] = np.inf
+    crit_idx = int(np.argmin(test))
+    
+    obs = t + bulge + beam / 2
+    f = x / D
+    ra = (obs - f * alt_b) / (1 - f)
+    ra[[0, -1]] = -np.inf
+    ia = int(np.argmax(ra))
+    
+    rb = (obs - (1 - f) * alt_a) / f
+    rb[[0, -1]] = -np.inf
+    ib = int(np.argmax(rb))
+    
+    delta = obs - center
+    delta[[0, -1]] = -np.inf
+    de = max(0.0, float(np.max(delta)))
+    
+    out = df.copy()
+    out["earth_curvature_m"] = bulge
+    out["centerline_los_m"] = center
+    out["beam_lower_edge_m"] = lower
+    out["beam_upper_edge_m"] = upper
+    out["beam_clearance_m"] = clear
+    return out, crit_idx, max(0.0, float(ra[ia] - ga)), max(0.0, float(rb[ib] - gb)), ha + de, hb + de
 
+# ==========================================
+# KML GENERATOR
+# ==========================================
+def generate_kml(sites_data):
+    """Generates standard Google Earth 3D KML for one or many links."""
+    kml = ['<?xml version="1.0" encoding="UTF-8"?>',
+           '<kml xmlns="http://www.opengis.net/kml/2.2">',
+           '<Document>',
+           '<name>LC LYNC LOS Surveys</name>',
+           '<Style id="clearLine"><LineStyle><color>ff00ff00</color><width>4</width></LineStyle></Style>',
+           '<Style id="blockedLine"><LineStyle><color>ff0000ff</color><width>4</width></LineStyle></Style>']
+    
+    for s in sites_data:
+        style = "#clearLine" if s["status"] == "CLEAR" else "#blockedLine"
+        kml.append(f"""
+        <Folder>
+            <name>{html.escape(s['name_a'])} to {html.escape(s['name_b'])}</name>
+            <Placemark>
+                <name>{html.escape(s['name_a'])}</name>
+                <Point><coordinates>{s['lon_a']},{s['lat_a']},{s.get('alt_a',0)}</coordinates></Point>
+            </Placemark>
+            <Placemark>
+                <name>{html.escape(s['name_b'])}</name>
+                <Point><coordinates>{s['lon_b']},{s['lat_b']},{s.get('alt_b',0)}</coordinates></Point>
+            </Placemark>
+            <Placemark>
+                <name>Path: {s['status']}</name>
+                <styleUrl>{style}</styleUrl>
+                <LineString>
+                    <extrude>1</extrude>
+                    <altitudeMode>absolute</altitudeMode>
+                    <coordinates>
+                        {s['lon_a']},{s['lat_a']},{s.get('alt_a',0)}
+                        {s['lon_b']},{s['lat_b']},{s.get('alt_b',0)}
+                    </coordinates>
+                </LineString>
+            </Placemark>
+        </Folder>
+        """)
+    kml.extend(['</Document>', '</kml>'])
+    return "".join(kml)
+
+# ==========================================
+# EXCEL IMPORT NORMALIZATION
+# ==========================================
 def normalize_excel(df):
-    # Accept common column naming variations from a manually prepared workbook.
     aliases = {
-        "site_a_name":["site a name","site_a_name","site a","site_a"],
-        "site_a_lat":["site a latitude","site a lat","lat a","latitude a","site_a_lat"],
-        "site_a_lon":["site a longitude","site a long","lon a","longitude a","site_a_lon"],
-        "site_b_name":["site b name","site_b_name","site b","site_b"],
-        "site_b_lat":["site b latitude","site b lat","lat b","latitude b","site_b_lat"],
-        "site_b_lon":["site b longitude","site b long","lon b","longitude b","site_b_lon"],
-        "height_a":["height a","site a height","site_a_height"],
-        "height_b":["height b","site b height","site_b_height"],
-        "power_mode":["power mode","device power mode","power_mode"],
-        "power_cable_length_m":["power cable length","power cable length m","power_cable_length_m"],
-        "data_output":["data output","data output port","data_output"],
-        "data_cable_length_m":["data cable length","data cable length m","data_cable_length_m"],
-        "beam_diameter_m":["beam diameter","beam diameter m","beam_diameter_m"],
+        "site_a_name": ["site a name", "site a", "site_a_name", "site_a"],
+        "site_a_lat": ["site a latitude", "site a lat", "lat a", "latitude a", "site_a_lat"],
+        "site_a_lon": ["site a longitude", "site a long", "lon a", "longitude a", "site_a_lon"],
+        "site_b_name": ["site b name", "site b", "site_b_name", "site_b"],
+        "site_b_lat": ["site b latitude", "site b lat", "lat b", "latitude b", "site_b_lat"],
+        "site_b_lon": ["site b longitude", "site b long", "lon b", "longitude b", "site_b_lon"],
+        "height_a": ["height a", "site a height", "height_a"],
+        "height_b": ["height b", "site b height", "height_b"],
+        "power_mode": ["power mode", "device power mode", "power_mode"],
+        "power_cable_length_m": ["power cable length", "power cable length m", "power_cable_length_m"],
+        "data_output": ["data output", "data output port", "data_output"],
+        "data_cable_length_m": ["data cable length", "data cable length m", "data_cable_length_m"],
+        "beam_diameter_m": ["beam diameter", "beam diameter m", "beam_diameter_m"],
     }
-    cols={str(c).strip().lower().replace("_"," "):c for c in df.columns}
-    out=pd.DataFrame(index=df.index)
+    cols = {str(c).strip().lower().replace("_", " "): c for c in df.columns}
+    out = pd.DataFrame(index=df.index)
     for target, names in aliases.items():
-        found=None
+        found = None
         for n in names:
-            key=n.lower().replace("_"," ")
-            if key in cols: found=cols[key]; break
-        if found is not None: out[target]=df[found]
-        else: out[target]=np.nan
+            key = n.lower().replace("_", " ")
+            if key in cols:
+                found = cols[key]
+                break
+        out[target] = df[found] if found is not None else np.nan
     return out
 
-def survey_template():
-    return pd.DataFrame([{
-        "Site A Name":"Site A-001","Site A Latitude":19.1533240,"Site A Longitude":72.8509670,
-        "Site B Name":"Site B-001","Site B Latitude":19.1510150,"Site B Longitude":72.8500800,
-        "Height A":10,"Height B":10,"Power Mode":"48V DC","Power Cable Length (m)":20,
-        "Data Output":"ETH","Data Cable Length (m)":30,"Beam Diameter (m)":3.0
-    }])
+# ==========================================
+# SIDEBAR NAVIGATION & INPUTS
+# ==========================================
+st.sidebar.title("LC LYNC LOS FEASIBILITY")
+mode = st.sidebar.radio("Analysis Mode", ["Single Link", "Multiple Links"])
 
-def make_report(rows):
-    return pd.DataFrame(rows)
+active_survey = None
 
-st.title("📡 Velmenni LC LYNC™ LOS Feasibility V3")
-st.caption("Single-link feasibility + multi-survey Excel processing + visual survey selector")
+if mode == "Single Link":
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Site A")
+    name_a = st.sidebar.text_input("Name", "Site A-001", key="s_na")
+    lat_a = st.sidebar.number_input("Lat", 19.1533240, format="%.7f", key="s_la")
+    lon_a = st.sidebar.number_input("Long", 72.8509670, format="%.7f", key="s_loa")
+    ha = st.sidebar.number_input("Height A (m AGL)", 0.0, 100.0, 10.0, step=0.5, key="s_ha")
 
-with st.sidebar:
-    st.header("📍 Site A")
-    name_a=st.text_input("Site A name","Site A")
-    lat_a=st.number_input("Latitude A",19.1533240,format="%.7f")
-    lon_a=st.number_input("Longitude A",72.8509670,format="%.7f")
-    ha=st.number_input("Current height A (m AGL)",0.0,value=10.0,step=0.5)
-    st.divider()
-    st.header("📍 Site B")
-    name_b=st.text_input("Site B name","Site B")
-    lat_b=st.number_input("Latitude B",19.1510150,format="%.7f")
-    lon_b=st.number_input("Longitude B",72.8500800,format="%.7f")
-    hb=st.number_input("Current height B (m AGL)",0.0,value=10.0,step=0.5)
-    st.divider()
-    st.header("⚡ Device / Cabling")
-    power=st.selectbox("Device Power Mode",["48V DC","AC PoE","220V AC"])
-    power_len=st.number_input("Power cable length (m)",min_value=0.0,value=20.0,step=1.0)
-    data=st.selectbox("Data Output Port",["ETH","SMF (Single Mode Fibre)","MMF (Multimode Fibre)"])
-    data_len=st.number_input("Data cable length (m)",min_value=0.0,value=30.0,step=1.0)
-    st.caption("For AC PoE, the power cable field is treated as the PoE Ethernet cable length. For 48V DC / 220V AC it is the power cable length.")
-    st.divider()
-    beam=st.select_slider("Maximum full beam diameter (m)",options=[2.0,2.5,3.0],value=3.0)
-    n=st.slider("Terrain samples",50,300,120,10)
-    click=st.button("🔍 ANALYZE LINK",type="primary",use_container_width=True)
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Site B")
+    name_b = st.sidebar.text_input("Name", "Site B-001", key="s_nb")
+    lat_b = st.sidebar.number_input("Lat", 19.1510150, format="%.7f", key="s_lb")
+    lon_b = st.sidebar.number_input("Long", 72.8500800, format="%.7f", key="s_lob")
+    hb = st.sidebar.number_input("Height B (m AGL)", 0.0, 100.0, 10.0, step=0.5, key="s_hb")
 
-if click: st.session_state["run"]=True
-if st.session_state.get("run",False):
-    try:
-        D,az,df=profile(lat_a,lon_a,lat_b,lon_b,n)
-        df["terrain_elevation_m"]=df.terrain_elevation_m.interpolate().bfill().ffill()
-        ga,gb=float(df.terrain_elevation_m.iloc[0]),float(df.terrain_elevation_m.iloc[-1])
-        df,ci,reqa,reqb,eqa,eqb=calc(df,ha,hb,ga,gb,beam)
-        crit=df.iloc[ci]
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Power & Data")
+    power_mode = st.sidebar.selectbox("Power Mode", ["48V DC", "AC PoE", "220V AC"], key="s_pm")
+    power_len = st.sidebar.number_input("Power Cable Length (m)", 0.0, 500.0, 20.0, key="s_pcl")
+    data_port = st.sidebar.selectbox("Data Output", ["ETH", "SMF (Single Mode)", "MMF (Multimode)"], key="s_do")
+    data_len = st.sidebar.number_input("Data Cable Length (m)", 0.0, 500.0, 30.0, key="s_dcl")
+    beam_d = st.sidebar.slider("Beam Diameter (m)", 1.0, 5.0, 3.0, 0.5, key="s_beam")
 
-        c1,c2,c3,c4=st.columns(4)
-        c1.metric("Distance",f"{D:.2f} m"); c2.metric("Azimuth A → B",f"{az:.2f}°")
-        c3.metric("Beam diameter",f"{beam:.1f} m"); c4.metric("Minimum clearance",f"{crit.beam_clearance_m:.2f} m")
-        if crit.beam_clearance_m >= 0:
-            st.success("### 🟢 CURRENT BEAM PATH: CLEAR")
-        else:
-            st.error("### 🔴 CURRENT BEAM PATH: BLOCKED")
+    if st.sidebar.button("ANALYSE LOS", type="primary", use_container_width=True):
+        with st.spinner("Calculating single link profile..."):
+            D, az_ab, az_ba, prof_df = compute_profile(lat_a, lon_a, lat_b, lon_b, n=120)
+            ga = float(prof_df.terrain_elevation_m.iloc[0])
+            gb = float(prof_df.terrain_elevation_m.iloc[-1])
+            calc_df, ci, reqa, reqb, eqa, eqb = analyze_los(prof_df, ha, hb, ga, gb, beam_d)
+            crit = calc_df.iloc[ci]
+            status = "CLEAR" if crit.beam_clearance_m >= 0 else "BLOCKED"
+            
+            st.session_state["single_result"] = {
+                "name_a": name_a, "lat_a": lat_a, "lon_a": lon_a, "ha": ha, "ga": ga, "alt_a": ga + ha,
+                "name_b": name_b, "lat_b": lat_b, "lon_b": lon_b, "hb": hb, "gb": gb, "alt_b": gb + hb,
+                "power_mode": power_mode, "power_len": power_len, "data_port": data_port, "data_len": data_len,
+                "beam": beam_d, "dist_m": D, "az_ab": az_ab, "az_ba": az_ba,
+                "status": status, "clearance": crit.beam_clearance_m,
+                "reqa": reqa, "reqb": reqb, "eqa": eqa, "eqb": eqb,
+                "crit_dist": crit.distance_m, "crit_lat": crit.latitude, "crit_lon": crit.longitude,
+                "profile_df": calc_df
+            }
 
-        st.subheader("🏗️ Required mounting height")
-        q1,q2,q3=st.columns(3)
-        q1.metric("Raise Site A only",f"{reqa:.1f} m AGL")
-        q2.metric("Raise Site B only",f"{reqb:.1f} m AGL")
-        q3.metric("Raise both equally",f"{eqa:.1f} / {eqb:.1f} m AGL")
+    if "single_result" in st.session_state:
+        active_survey = st.session_state["single_result"]
 
-        st.subheader("🛰️ Visual inspection map")
-        m=folium.Map(location=[(lat_a+lat_b)/2,(lon_a+lon_b)/2],zoom_start=16,tiles=None)
-        folium.TileLayer("OpenStreetMap",name="Map").add_to(m)
-        folium.TileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                         attr="Esri World Imagery",name="Satellite").add_to(m)
-        folium.TileLayer("https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png",
-                         attr="OpenTopoMap",name="Topographic").add_to(m)
-        folium.Marker([lat_a,lon_a],tooltip=name_a,popup=f"<b>{name_a}</b><br>Lat: {lat_a:.7f}<br>Long: {lon_a:.7f}<br>Height: {ha:.1f} m AGL",
-                      icon=folium.Icon(color="blue",icon="signal")).add_to(m)
-        folium.Marker([lat_b,lon_b],tooltip=name_b,popup=f"<b>{name_b}</b><br>Lat: {lat_b:.7f}<br>Long: {lon_b:.7f}<br>Height: {hb:.1f} m AGL",
-                      icon=folium.Icon(color="red",icon="signal")).add_to(m)
-        folium.PolyLine([[lat_a,lon_a],[lat_b,lon_b]],color="blue",weight=5,
-                        tooltip=f"{D:.1f} m | Azimuth {az:.1f}°").add_to(m)
-        for lat,lon,text,color in [(lat_a,lon_a,name_a,"#0b3d91"),(lat_b,lon_b,name_b,"#a40000")]:
-            folium.Marker([lat,lon],icon=folium.DivIcon(html=f"""<div style="font-size:13px;font-weight:700;color:{color};white-space:nowrap;background:rgba(255,255,255,.9);border:1px solid {color};border-radius:4px;padding:3px 6px;transform:translate(10px,-34px)">{text}</div>""")).add_to(m)
-        folium.Marker([(lat_a+lat_b)/2,(lon_a+lon_b)/2],icon=folium.DivIcon(html=f"""<div style="font-size:13px;font-weight:700;color:#111;white-space:nowrap;background:rgba(255,255,255,.94);border:1px solid #333;border-radius:5px;padding:4px 8px;transform:translate(-50%,-50%);text-align:center">{D:.1f} m<br><span style="font-size:11px">Azimuth {az:.1f}°</span></div>""")).add_to(m)
-        folium.CircleMarker([crit.latitude,crit.longitude],radius=7,color="red",fill=True,tooltip="Governing terrain point").add_to(m)
-        folium.LayerControl().add_to(m)
-        st_folium(m,use_container_width=True,height=560)
-        st.markdown(f"[🌍 Open A → B path in Google Maps](https://www.google.com/maps/dir/?api=1&origin={lat_a},{lon_a}&destination={lat_b},{lon_b})")
+else:  # Multiple Links Mode
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Multiple Links")
+    up_file = st.sidebar.file_uploader("Upload Excel", type=["xlsx", "xls"])
+    
+    # Template download helper
+    template_buf = io.BytesIO()
+    with pd.ExcelWriter(template_buf, engine="openpyxl") as w:
+        pd.DataFrame([{
+            "Site A Name": "Site 1", "Site A Latitude": 19.153324, "Site A Longitude": 72.850967, "Height A": 10.0,
+            "Site B Name": "Site 2", "Site B Latitude": 19.151015, "Site B Longitude": 72.850080, "Height B": 10.0,
+            "Power Mode": "48V DC", "Power Cable Length (m)": 20, "Data Output": "ETH", "Data Cable Length (m)": 30,
+            "Beam Diameter (m)": 3.0
+        }]).to_excel(w, index=False)
+    st.sidebar.download_button("Download Template", template_buf.getvalue(), "LOS_Input_Template.xlsx", use_container_width=True)
 
-        st.subheader("⛰️ Terrain / optical beam profile")
-        fig=go.Figure()
-        for col,label in [("terrain_elevation_m","Terrain"),("centerline_los_m","Optical centerline"),("beam_lower_edge_m","Lower beam edge"),("beam_upper_edge_m","Upper beam edge")]:
-            fig.add_trace(go.Scatter(x=df.distance_m,y=df[col],mode="lines",name=label))
-        fig.add_trace(go.Scatter(x=[crit.distance_m],y=[crit.terrain_elevation_m],mode="markers",marker=dict(size=12),name="Governing point"))
-        fig.update_layout(height=500,xaxis_title="Distance from Site A (m)",yaxis_title="Elevation (m)",hovermode="x unified",legend=dict(orientation="h"))
-        st.plotly_chart(fig,use_container_width=True)
-
-        st.subheader("📋 Survey report")
-        report=pd.DataFrame([
-            ["Site A Name",name_a],["Site A Latitude",lat_a],["Site A Longitude",lon_a],
-            ["Site B Name",name_b],["Site B Latitude",lat_b],["Site B Longitude",lon_b],
-            ["Device Power Mode",power],
-            ["Power / PoE Cable Length (m)",power_len],
-            ["Data Output Port",data],
-            ["Data Cable Length (m)",data_len],
-            ["Distance (m)",D],["Azimuth A → B (deg)",az],
-            ["Ground Elevation A (m)",ga],["Ground Elevation B (m)",gb],
-            ["Current A Height AGL (m)",ha],["Current B Height AGL (m)",hb],
-            ["Maximum Beam Diameter (m)",beam],["Minimum Beam Clearance (m)",crit.beam_clearance_m],
-            ["Required A Height if B Fixed (m AGL)",reqa],["Required B Height if A Fixed (m AGL)",reqb],
-            ["Equal-rise A Height (m AGL)",eqa],["Equal-rise B Height (m AGL)",eqb],
-            ["Governing Point Distance from A (m)",crit.distance_m],
-            ["Governing Point Latitude",crit.latitude],["Governing Point Longitude",crit.longitude],
-        ],columns=["Parameter","Value"])
-        st.dataframe(report,use_container_width=True,hide_index=True)
-        st.download_button("⬇️ Download Single Survey CSV",report.to_csv(index=False).encode(),"LC_LYNC_Single_Survey.csv","text/csv")
-
-        st.warning("Preliminary planning only: visually/physically verify buildings, trees, poles and other structures. The selected 2–3 m beam is a planning envelope and should be checked against measured optical performance.")
-    except Exception as e:
-        st.error("Analysis failed"); st.exception(e)
-else:
-    st.info("Enter the two sites, cabling and optical parameters, then click ANALYZE LINK.")
-
-st.divider()
-st.header("📚 Multi-Survey Excel Processor")
-st.write("Upload an Excel file containing multiple survey rows. The tool calculates distance, azimuth, terrain/LOS and required heights for every row, then produces an Excel survey report.")
-
-template = survey_template()
-
-# Streamlit download_button needs file bytes, not the return value of
-# DataFrame.to_excel(). Build the XLSX in memory first.
-template_buf = io.BytesIO()
-with pd.ExcelWriter(template_buf, engine="openpyxl") as writer:
-    template.to_excel(writer, index=False, sheet_name="Survey Input Template")
-
-st.download_button(
-    "⬇️ Download Excel input template",
-    data=template_buf.getvalue(),
-    file_name="LC_LYNC_Multi_Survey_Template.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
-
-up=st.file_uploader("Upload multi-survey Excel (.xlsx)",type=["xlsx"])
-if up:
-    try:
-        raw=pd.read_excel(up)
-        inp=normalize_excel(raw)
-        required=["site_a_name","site_a_lat","site_a_lon","site_b_name","site_b_lat","site_b_lon"]
-        missing=[x for x in required if inp[x].isna().all()]
-        if missing:
-            st.error("Missing required fields: "+", ".join(missing))
-        else:
-            st.success(f"Loaded {len(inp)} survey row(s).")
-            labels=[]
-            results=[]
-            profiles={}
-            for i,row in inp.iterrows():
+    if up_file:
+        if st.sidebar.button("ANALYSE ALL", type="primary", use_container_width=True):
+            raw = pd.read_excel(up_file)
+            inp = normalize_excel(raw)
+            results_dict = {}
+            summary_records = []
+            
+            prog = st.sidebar.progress(0.0)
+            total = len(inp)
+            for idx, row in inp.iterrows():
                 try:
-                    A=str(row.site_a_name) if pd.notna(row.site_a_name) else f"Survey {i+1} A"
-                    B=str(row.site_b_name) if pd.notna(row.site_b_name) else f"Survey {i+1} B"
-                    la=float(row.site_a_lat); loa=float(row.site_a_lon); lb=float(row.site_b_lat); lob=float(row.site_b_lon)
-                    haa=float(row.height_a) if pd.notna(row.height_a) else 10.0
-                    hbb=float(row.height_b) if pd.notna(row.height_b) else 10.0
-                    bm=float(row.beam_diameter_m) if pd.notna(row.beam_diameter_m) else 3.0
-                    pm=str(row.power_mode) if pd.notna(row.power_mode) else "48V DC"
-                    pc=float(row.power_cable_length_m) if pd.notna(row.power_cable_length_m) else 0.0
-                    do=str(row.data_output) if pd.notna(row.data_output) else "ETH"
-                    dc=float(row.data_cable_length_m) if pd.notna(row.data_cable_length_m) else 0.0
-                    D,az,p=profile(la,loa,lb,lob,100)
-                    p["terrain_elevation_m"]=p.terrain_elevation_m.interpolate().bfill().ffill()
-                    ga2,gb2=float(p.terrain_elevation_m.iloc[0]),float(p.terrain_elevation_m.iloc[-1])
-                    p,ci2,ra2,rb2,eqa2,eqb2=calc(p,haa,hbb,ga2,gb2,bm); cr=p.iloc[ci2]
-                    status="CLEAR" if cr.beam_clearance_m>=0 else "BLOCKED"
-                    results.append({"Survey ID":i+1,"Site A Name":A,"Site A Latitude":la,"Site A Longitude":loa,
-                        "Site B Name":B,"Site B Latitude":lb,"Site B Longitude":lob,"Device Power Mode":pm,
-                        "Power/PoE Cable Length (m)":pc,"Data Output Port":do,"Data Cable Length (m)":dc,
-                        "Distance (m)":D,"Azimuth (deg)":az,"Height A (m AGL)":haa,"Height B (m AGL)":hbb,
-                        "Beam Diameter (m)":bm,"LOS Status":status,"Minimum Beam Clearance (m)":float(cr.beam_clearance_m),
-                        "Required A Height (m AGL)":ra2,"Required B Height (m AGL)":rb2,
-                        "Equal-rise A Height (m AGL)":eqa2,"Equal-rise B Height (m AGL)":eqb2,
-                        "Governing Point Distance (m)":float(cr.distance_m),"Governing Point Latitude":float(cr.latitude),
-                        "Governing Point Longitude":float(cr.longitude)})
-                    labels.append(f"{i+1}: {A} → {B} ({D:.1f} m)")
-                    profiles[i+1]=(p,A,B,la,loa,lb,lob,D,az,haa,hbb,pm,pc,do,dc)
-                except Exception as ex:
-                    results.append({"Survey ID":i+1,"Site A Name":row.site_a_name,"Site B Name":row.site_b_name,"LOS Status":"ERROR","Error":str(ex)})
-                    labels.append(f"{i+1}: ERROR")
-            results_df=pd.DataFrame(results)
-            st.subheader("📊 Multi-survey report")
-            st.dataframe(results_df,use_container_width=True,hide_index=True)
-            buf=io.BytesIO()
-            with pd.ExcelWriter(buf,engine="openpyxl") as writer:
-                results_df.to_excel(writer,index=False,sheet_name="Survey Report")
-                inp.to_excel(writer,index=False,sheet_name="Input Data")
-            buf.seek(0)
-            st.download_button("⬇️ Download Multi-Survey Excel Report",buf.getvalue(),
-                               "LC_LYNC_Multi_Survey_Report.xlsx",
-                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                    na = str(row.site_a_name) if pd.notna(row.site_a_name) else f"Site A-{idx+1}"
+                    nb = str(row.site_b_name) if pd.notna(row.site_b_name) else f"Site B-{idx+1}"
+                    la, loa = float(row.site_a_lat), float(row.site_a_lon)
+                    lb, lob = float(row.site_b_lat), float(row.site_b_lon)
+                    h_a = float(row.height_a) if pd.notna(row.height_a) else 10.0
+                    h_b = float(row.height_b) if pd.notna(row.height_b) else 10.0
+                    bm = float(row.beam_diameter_m) if pd.notna(row.beam_diameter_m) else 3.0
+                    pm = str(row.power_mode) if pd.notna(row.power_mode) else "48V DC"
+                    plen = float(row.power_cable_length_m) if pd.notna(row.power_cable_length_m) else 0.0
+                    dout = str(row.data_output) if pd.notna(row.data_output) else "ETH"
+                    dlen = float(row.data_cable_length_m) if pd.notna(row.data_cable_length_m) else 0.0
 
-            if profiles:
-                st.subheader("👁️ Visual check one survey at a time")
-                choice=st.selectbox("Select survey to view",labels)
-                sid=int(choice.split(":")[0])
-                p,A,B,la,loa,lb,lob,D,az,haa,hbb,pm,pc,do,dc=profiles[sid]
-                vm=folium.Map(location=[(la+lb)/2,(loa+lob)/2],zoom_start=16,tiles=None)
-                folium.TileLayer("OpenStreetMap",name="Map").add_to(vm)
-                folium.TileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-                                 attr="Esri World Imagery",name="Satellite").add_to(vm)
-                folium.Marker([la,loa],tooltip=A,icon=folium.Icon(color="blue",icon="signal")).add_to(vm)
-                folium.Marker([lb,lob],tooltip=B,icon=folium.Icon(color="red",icon="signal")).add_to(vm)
-                folium.PolyLine([[la,loa],[lb,lob]],color="blue",weight=5,tooltip=f"{D:.1f} m | {az:.1f}°").add_to(vm)
-                folium.Marker([(la+lb)/2,(loa+lob)/2],icon=folium.DivIcon(html=f"""<div style="font-weight:700;background:white;border:1px solid #333;padding:4px;transform:translate(-50%,-50%)">{D:.1f} m<br><small>Azimuth {az:.1f}°</small></div>""")).add_to(vm)
-                folium.LayerControl().add_to(vm)
-                st_folium(vm,use_container_width=True,height=520,key=f"multi_map_{sid}")
-                selected=results_df[results_df["Survey ID"]==sid]
-                st.dataframe(selected.T.rename(columns={selected.index[0]:"Value"}) if len(selected) else pd.DataFrame(),use_container_width=True)
-    except Exception as ex:
-        st.error(f"Could not process Excel: {ex}")
+                    D, az_ab, az_ba, prof_df = compute_profile(la, loa, lb, lob, n=100)
+                    ga = float(prof_df.terrain_elevation_m.iloc[0])
+                    gb = float(prof_df.terrain_elevation_m.iloc[-1])
+                    calc_df, ci, reqa, reqb, eqa, eqb = analyze_los(prof_df, h_a, h_b, ga, gb, bm)
+                    crit = calc_df.iloc[ci]
+                    status = "CLEAR" if crit.beam_clearance_m >= 0 else "BLOCKED"
+
+                    key_label = f"{idx+1}: {na} → {nb}"
+                    rec = {
+                        "Survey ID": idx + 1, "key": key_label, "name_a": na, "lat_a": la, "lon_a": loa, "ha": h_a, "ga": ga, "alt_a": ga + h_a,
+                        "name_b": nb, "lat_b": lb, "lon_b": lob, "hb": h_b, "gb": gb, "alt_b": gb + h_b,
+                        "power_mode": pm, "power_len": plen, "data_port": dout, "data_len": dlen, "beam": bm,
+                        "dist_m": D, "az_ab": az_ab, "az_ba": az_ba, "status": status, "clearance": crit.beam_clearance_m,
+                        "reqa": reqa, "reqb": reqb, "eqa": eqa, "eqb": eqb,
+                        "crit_dist": crit.distance_m, "crit_lat": crit.latitude, "crit_lon": crit.longitude,
+                        "profile_df": calc_df
+                    }
+                    results_dict[key_label] = rec
+                    summary_records.append(rec)
+                except Exception as ex:
+                    st.sidebar.error(f"Row {idx+1} Error: {ex}")
+                prog.progress((idx + 1) / total)
+
+            st.session_state["batch_results"] = results_dict
+            st.session_state["summary_records"] = summary_records
+            st.sidebar.success(f"Processed {len(summary_records)} links successfully!")
+
+    if "batch_results" in st.session_state and st.session_state["batch_results"]:
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("Select Survey")
+        keys = list(st.session_state["batch_results"].keys())
+        selected_key = st.sidebar.selectbox("▼ Choose Link", keys)
+        active_survey = st.session_state["batch_results"][selected_key]
+        
+        # Batch and Selected Download Buttons
+        st.sidebar.markdown("---")
+        # 1. Download Selected KML
+        sel_kml = generate_kml([active_survey])
+        st.sidebar.download_button(
+            "Download Selected KML", sel_kml, 
+            file_name=f"{active_survey['name_a']}_{active_survey['name_b']}.kml", mime="application/vnd.google-earth.kml+xml",
+            use_container_width=True
+        )
+        
+        # 2. Download All KML
+        all_kml = generate_kml(list(st.session_state["batch_results"].values()))
+        st.sidebar.download_button(
+            "Download All KML", all_kml, 
+            file_name="All_Survey_Links.kml", mime="application/vnd.google-earth.kml+xml",
+            use_container_width=True
+        )
+        
+        # 3. Download Full Excel Report
+        rep_buf = io.BytesIO()
+        with pd.ExcelWriter(rep_buf, engine="openpyxl") as w:
+            rep_df = pd.DataFrame([{k: v for k, v in r.items() if k != "profile_df"} for r in st.session_state["summary_records"]])
+            rep_df.to_excel(w, index=False, sheet_name="LOS Summary Report")
+        st.sidebar.download_button(
+            "Download Excel Report", rep_buf.getvalue(),
+            file_name="LC_LYNC_LOS_Report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+
+# ==========================================
+# MAIN SCREEN DISPLAY
+# ==========================================
+if active_survey:
+    s = active_survey
+    st.header("LINK SUMMARY")
+    st.markdown("---")
+    
+    # Distance & Azimuths
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Distance", f"{s['dist_m']/1000.0:.3f} km ({s['dist_m']:.1f} m)")
+    m2.metric("Azimuth A → B", f"{s['az_ab']:.2f}°")
+    m3.metric("Azimuth B → A", f"{s['az_ba']:.2f}°")
+
+    st.write("")
+    c_a, c_b = st.columns(2)
+    with c_a:
+        st.subheader("SITE A")
+        st.markdown(f"**Point:** `{s['name_a']}`")
+        st.write(f"**Lat:** `{s['lat_a']:.7f}`")
+        st.write(f"**Long:** `{s['lon_a']:.7f}`")
+        st.write(f"**Elevation:** `{s['ga']:.1f} m` | **Device Height:** `{s['ha']:.1f} m AGL`")
+    with c_b:
+        st.subheader("SITE B")
+        st.markdown(f"**Point:** `{s['name_b']}`")
+        st.write(f"**Lat:** `{s['lat_b']:.7f}`")
+        st.write(f"**Long:** `{s['lon_b']:.7f}`")
+        st.write(f"**Elevation:** `{s['gb']:.1f} m` | **Device Height:** `{s['hb']:.1f} m AGL`")
+
+    st.write("")
+    if s["status"] == "CLEAR":
+        st.success(f"### 🟢 LOS FEASIBILITY: CLEAR (Margin: {s['clearance']:.2f} m)")
+    else:
+        st.error(f"### 🔴 LOS FEASIBILITY: BLOCKED (Obstruction by {abs(s['clearance']):.2f} m)")
+
+    # Suggested Height Adjustments
+    st.markdown("**Mounting Height Solutions to Clear Optical Beam:**")
+    h1, h2, h3 = st.columns(3)
+    h1.info(f"**Raise Site A Only:** {s['reqa']:.1f} m AGL")
+    h2.info(f"**Raise Site B Only:** {s['reqb']:.1f} m AGL")
+    h3.info(f"**Equal Raise:** {s['eqa']:.1f} m / {s['eqb']:.1f} m AGL")
+
+    # SECTION: LOS / TERRAIN PROFILE
+    st.markdown("---")
+    st.header("LOS / TERRAIN PROFILE")
+    fig = go.Figure()
+    pdf = s["profile_df"]
+    fig.add_trace(go.Scatter(x=pdf.distance_m, y=pdf.terrain_elevation_m, mode="lines", name="Terrain Elevation", line=dict(color="#8B5A2B", width=2)))
+    fig.add_trace(go.Scatter(x=pdf.distance_m, y=pdf.centerline_los_m, mode="lines", name="Beam Centerline", line=dict(color="#1f77b4", dash="dash")))
+    fig.add_trace(go.Scatter(x=pdf.distance_m, y=pdf.beam_lower_edge_m, mode="lines", name="Lower Edge", line=dict(color="#aec7e8", width=1)))
+    fig.add_trace(go.Scatter(x=pdf.distance_m, y=pdf.beam_upper_edge_m, mode="lines", name="Upper Edge", line=dict(color="#aec7e8", width=1), fill="tonexty", fillcolor="rgba(31, 119, 180, 0.1)"))
+    fig.add_trace(go.Scatter(x=[s["crit_dist"]], y=[pdf.loc[pdf.distance_m == s["crit_dist"], "terrain_elevation_m"].iloc[0]], mode="markers", name="Critical Point", marker=dict(size=12, color="red", symbol="x")))
+    fig.update_layout(height=450, xaxis_title="Distance from Site A (m)", yaxis_title="Elevation (m)", hovermode="x unified", legend=dict(orientation="h", y=1.1))
+    st.plotly_chart(fig, use_container_width=True)
+
+    # SECTION: VISUAL INSPECTION
+    st.markdown("---")
+    st.header("VISUAL INSPECTION")
+    center_lat = (s["lat_a"] + s["lat_b"]) / 2
+    center_lon = (s["lon_a"] + s["lon_b"]) / 2
+    folium_map = folium.Map(location=[center_lat, center_lon], zoom_start=15, tiles=None)
+    folium.TileLayer("OpenStreetMap", name="Street Map").add_to(folium_map)
+    folium.TileLayer(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri World Imagery", name="Satellite"
+    ).add_to(folium_map)
+    
+    path_color = "green" if s["status"] == "CLEAR" else "red"
+    folium.Marker([s["lat_a"], s["lon_a"]], tooltip=s["name_a"], icon=folium.Icon(color="blue", icon="tower")).add_to(folium_map)
+    folium.Marker([s["lat_b"], s["lon_b"]], tooltip=s["name_b"], icon=folium.Icon(color="darkblue", icon="tower")).add_to(folium_map)
+    folium.PolyLine([[s["lat_a"], s["lon_a"]], [s["lat_b"], s["lon_b"]]], color=path_color, weight=4, opacity=0.8).add_to(folium_map)
+    folium.CircleMarker([s["crit_lat"], s["crit_lon"]], radius=6, color="red", fill=True, tooltip="Worst Clearance Point").add_to(folium_map)
+    folium.LayerControl().add_to(folium_map)
+    st_folium(folium_map, use_container_width=True, height=500, key=f"map_{s.get('key', 'single')}")
+
+    # SECTION: REPORT / EXPORT
+    st.markdown("---")
+    st.header("REPORT")
+    single_rep_df = pd.DataFrame([{k: v for k, v in s.items() if k != "profile_df"}])
+    st.dataframe(single_rep_df.T.rename(columns={0: "Survey Parameter"}), use_container_width=True)
+
+    out_buf = io.BytesIO()
+    with pd.ExcelWriter(out_buf, engine="openpyxl") as w:
+        single_rep_df.to_excel(w, index=False, sheet_name="Survey Detail")
+    
+    r1, r2 = st.columns(2)
+    with r1:
+        st.download_button("Download Excel Report", out_buf.getvalue(), file_name=f"{s['name_a']}_{s['name_b']}_report.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+    with r2:
+        kml_out = generate_kml([s])
+        st.download_button("Download KML", kml_out, file_name=f"{s['name_a']}_{s['name_b']}.kml", mime="application/vnd.google-earth.kml+xml", use_container_width=True)
+
+else:
+    st.info("👈 Select an Analysis Mode in the sidebar and run the calculation to view the LOS summary.")
