@@ -14,29 +14,11 @@ st.set_page_config(page_title="LC LYNC LOS Feasibility", page_icon="📡", layou
 # Insert CSS right here:
 st.markdown("""
     <style>
-    /* Hide toolbar & GitHub buttons */
+    /* Hide top-right action buttons (GitHub link, settings, deploy) */
     [data-testid="stToolbar"] { display: none !important; }
     #MainMenu { display: none !important; }
     footer { display: none !important; }
     .stDeployButton { display: none !important; }
-
-    /* Make the sidebar open button prominent and visible on mobile */
-    button[kind="header"] {
-        display: flex !important;
-        visibility: visible !important;
-        opacity: 1 !important;
-        background-color: #2b5c8f !important;
-        color: white !important;
-        border-radius: 8px !important;
-        position: fixed !important;
-        top: 10px !important;
-        left: 10px !important;
-        z-index: 9999999 !important;
-        padding: 4px 8px !important;
-    }
-    button[kind="header"] svg {
-        fill: white !important;
-    }
     </style>
 """, unsafe_allow_html=True)
 R = 6371000.0  # Earth radius in meters
