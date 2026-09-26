@@ -14,19 +14,28 @@ st.set_page_config(page_title="LC LYNC LOS Feasibility", page_icon="📡", layou
 # Insert CSS right here:
 st.markdown("""
     <style>
-    /* Hide the 3-dots menu, fork button, and toolbar containing GitHub links */
-    #MainMenu {visibility: hidden !important; display: none !important;}
-    footer {visibility: hidden !important; display: none !important;}
-    .stDeployButton {display: none !important;}
-    [data-testid="stToolbar"] {display: none !important;}
-    [data-testid="stDecoration"] {display: none !important;}
-    [data-testid="stStatusWidget"] {display: none !important;}
+    /* Hide toolbar & GitHub buttons */
+    [data-testid="stToolbar"] { display: none !important; }
+    #MainMenu { display: none !important; }
+    footer { display: none !important; }
+    .stDeployButton { display: none !important; }
 
-    /* KEEP the sidebar open button visible on mobile */
-    [data-testid="stSidebarCollapsedControl"] {
-        display: block !important;
+    /* Make the sidebar open button prominent and visible on mobile */
+    button[kind="header"] {
+        display: flex !important;
         visibility: visible !important;
-        z-index: 999999 !important;
+        opacity: 1 !important;
+        background-color: #2b5c8f !important;
+        color: white !important;
+        border-radius: 8px !important;
+        position: fixed !important;
+        top: 10px !important;
+        left: 10px !important;
+        z-index: 9999999 !important;
+        padding: 4px 8px !important;
+    }
+    button[kind="header"] svg {
+        fill: white !important;
     }
     </style>
 """, unsafe_allow_html=True)
